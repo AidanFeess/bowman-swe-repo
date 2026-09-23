@@ -2,7 +2,7 @@
 GitHub repo for Dr. Bowman's SWE class
 
 Team:
-- Aidan.
+- Aidan
 - Alayna
 - Grayson
 - Hunter
