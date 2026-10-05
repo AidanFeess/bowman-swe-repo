@@ -4,6 +4,7 @@ A minimal web service for CSC 4033 that calculates a sale price from a price and
 
 **Live service:** https://deal-tracker-skeleton.onrender.com/
 **Endpoint docs:** https://deal-tracker-skeleton.onrender.com/docs
+**Repository:** https://github.com/AidanFeess/bowman-swe-repo/tree/main/Project%20Skeleton
 
 > Hosted on Render's free tier. The first load may take up to a minute while the service wakes up.
 
@@ -32,18 +33,20 @@ A minimal web service for CSC 4033 that calculates a sale price from a price and
 | `GET /docs` | nothing | A page listing every endpoint |
 
 **Examples:**
-- `/discount?price=60&percent=25` → `200` and `{"price": 60.0, "percent": 25.0, "sale_price": 45.0}`
-- `/discount?price=60&percent=150` → `400` and `{"error": "..."}`
+- `/discount?price=60&percent=25` returns `200` and `{"price": 60.0, "percent": 25.0, "sale_price": 45.0}`
+- `/discount?price=60&percent=150` returns `400` and `{"error": "..."}`
 
 ---
 
 ## Files
 
+All service files are in the `Project Skeleton` folder. The test workflow is at the repository root, because GitHub Actions only reads workflows from there.
+
 | File | Purpose |
 |---|---|
-| `app.py` | The Flask web service |
-| `test_app.py` | Four automated tests |
-| `requirements.txt` | Packages to install (Flask, Gunicorn) |
+| `Project Skeleton/app.py` | The Flask web service |
+| `Project Skeleton/test_app.py` | Four automated tests |
+| `Project Skeleton/requirements.txt` | Packages to install (Flask, Gunicorn) |
 | `.github/workflows/tests.yml` | Tells GitHub Actions to run the tests on every push |
 
 ---
@@ -51,8 +54,8 @@ A minimal web service for CSC 4033 that calculates a sale price from a price and
 ## How to Start the Service on Render
 
 1. Go to https://render.com and click **Get Started**. Sign up with **GitHub**.
-2. In the dashboard, click **+ New → Web Service**.
-3. Connect GitHub and select the `deal-tracker-skeleton` repository.
+2. In the dashboard, click **+ New > Web Service**.
+3. Connect GitHub and select the `bowman-swe-repo` repository.
 4. Fill in the settings:
 
    | Field | Value |
@@ -61,12 +64,13 @@ A minimal web service for CSC 4033 that calculates a sale price from a price and
    | Language | Python 3 |
    | Branch | `main` |
    | Region | Ohio (US East) |
+   | Root Directory | `Project Skeleton` |
    | Build Command | `pip install -r requirements.txt` |
    | Start Command | `gunicorn app:app` |
    | Instance Type | Free |
 
 5. Click **Deploy Web Service**.
-6. Wait for the log to say **"Your service is live"** (about 2–3 minutes).
+6. Wait for the log to say **"Your service is live"** (about 2 to 3 minutes).
 7. Open the URL shown at the top of the page.
 
 Render redeploys automatically every time code is pushed to `main`.
