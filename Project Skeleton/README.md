@@ -2,8 +2,8 @@
 
 A minimal web service for CSC 4033 that calculates a sale price from a price and a discount percent.
 
-**Live service:** https://deal-tracker-skeleton.onrender.com/
-**Endpoint docs:** https://deal-tracker-skeleton.onrender.com/docs
+**Live service:** https://deal-tracker-skeleton1.onrender.com/
+**Endpoint docs:** https://deal-tracker-skeleton1.onrender.com/docs
 **Repository:** https://github.com/AidanFeess/bowman-swe-repo/tree/main/Project%20Skeleton
 
 > Hosted on Render's free tier. The first load may take up to a minute while the service wakes up.
