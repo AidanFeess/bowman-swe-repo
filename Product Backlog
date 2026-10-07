@@ -1,0 +1,7 @@
+Product Backlog 
+(/WishList LinkforGame) The bot will have a way to receive and store games that users wishlist
+(/List) The bot will have the ability to list all wishlists from all users per-server
+(/PullPricing LinkForGame) The bot will have the ability to check and list prices and discounts on specified games from various stores (Steam, Epic Games, etc.)
+(/Compare) The bot will have the ability to compare the prices and discounts it finds with games listed in user’s wishlists and the same game listed in the specified store 
+There will also be an implementation to compare manually and compare on a specified recurring schedule 
+(/Daily ChannelID) The bot will have the ability to post a daily digest of wishlists and discounts 
