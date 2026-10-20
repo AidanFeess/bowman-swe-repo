@@ -9,7 +9,9 @@ def init_db():
 
 
 def add_game(guild_id, user_id, app_id, name):
-    link = f"https://store.steampowered.com/app/{app_id}/"
+    """Returns True if added, False if this user already has the game.
+    guild_id is accepted but not stored, because the wishlist table has no server column."""
+    link = f"https://store.steampowered.com/app/{app_id}/"   # one link per game, so duplicates are caught
     try:
         with closing(sqlite3.connect(DATABASE_PATH)) as conn:
             with conn:
@@ -21,13 +23,16 @@ def add_game(guild_id, user_id, app_id, name):
     except sqlite3.IntegrityError:
         return False
 
-def get_wishlist():
-    " Returns  games shared in the wishlist"
+
+def get_wishlist(user_id):
+    """Returns (game, store, link) for this user's wishlist only."""
     with closing(sqlite3.connect(DATABASE_PATH)) as conn:
         return conn.execute(
             """
-            SELECT DISTINCT game, store, link
+            SELECT game, store, link
             FROM wishlist
+            WHERE discord_user_id = ?
             ORDER BY game COLLATE NOCASE, store, link
-            """
+            """,
+            (str(user_id),),
         ).fetchall()
