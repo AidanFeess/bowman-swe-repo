@@ -1,13 +1,22 @@
-_games = set()
+import sqlite3
+from contextlib import closing
+
+from database import DATABASE_PATH, create_tables
 
 
 def init_db():
-    pass
+    create_tables()
 
 
 def add_game(guild_id, user_id, app_id, name):
-    key = (guild_id, user_id, app_id)
-    if key in _games:
+    link = f"https://store.steampowered.com/app/{app_id}/"
+    try:
+        with closing(sqlite3.connect(DATABASE_PATH)) as conn:
+            with conn:
+                conn.execute(
+                    "INSERT INTO wishlist (discord_user_id, game, store, link) VALUES (?, ?, 'steam', ?)",
+                    (str(user_id), name, link),
+                )
+        return True
+    except sqlite3.IntegrityError:
         return False
-    _games.add(key)
-    return True
