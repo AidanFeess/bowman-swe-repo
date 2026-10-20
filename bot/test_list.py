@@ -1,62 +1,68 @@
-
-"""Tests for the shared wishlist query, using an isolated temporary SQLite file."""
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
-from contextlib import closing
 
 import database
 import db
 
 
 class TestGetWishlist(unittest.TestCase):
+
     def setUp(self):
-        temp_dir = tempfile.TemporaryDirectory()
-        self.addCleanup(temp_dir.cleanup)
-        path = Path(temp_dir.name) / "wishlist.db"
-        path_patch = patch.object(database, "DATABASE_PATH", path)
-        db_path_patch = patch.object(db, "DATABASE_PATH", path)
-        path_patch.start()
-        db_path_patch.start()
-        self.addCleanup(db_path_patch.stop)
-        self.addCleanup(path_patch.stop)
+        # Use a throwaway database file so the real wishlist.db is never touched
+        self.tmp = tempfile.TemporaryDirectory()
+        path = Path(self.tmp.name) / "test.db"
+        self.patches = [
+            patch.object(database, "DATABASE_PATH", path),
+            patch.object(db, "DATABASE_PATH", path),
+        ]
+        for p in self.patches:
+            p.start()
         db.init_db()
-        self.path = path
+
+    def tearDown(self):
+        for p in self.patches:
+            p.stop()
+        self.tmp.cleanup()
 
     def test_empty_wishlist(self):
-        self.assertEqual(db.get_wishlist(), [])
+        self.assertEqual(db.get_wishlist(1), [])
+
+    def test_user_sees_their_own_games(self):
+        db.add_game(0, 1, 1245620, "Elden Ring")
+        games = [row[0] for row in db.get_wishlist(1)]
+        self.assertEqual(games, ["Elden Ring"])
+
+    def test_user_does_not_see_other_users_games(self):
+        db.add_game(0, 1, 1245620, "Elden Ring")
+        self.assertEqual(db.get_wishlist(2), [])
+
+    def test_same_game_on_two_wishlists_shows_for_each_user(self):
+        db.add_game(0, 1, 620, "Portal 2")
+        db.add_game(0, 2, 620, "Portal 2")
+        self.assertEqual(len(db.get_wishlist(1)), 1)
+        self.assertEqual(len(db.get_wishlist(2)), 1)
 
     def test_games_are_sorted_by_name(self):
-        db.add_game(1, 10, 620, "Portal 2")
-        db.add_game(1, 10, 440, "Team Fortress 2")
-        db.add_game(1, 10, 105600, "terraria")
-        self.assertEqual(
-            [game for game, store, link in db.get_wishlist()],
-            ["Portal 2", "Team Fortress 2", "terraria"],
-        )
-
-    def test_game_added_by_multiple_users_is_listed_once(self):
-        db.add_game(1, 10, 620, "Portal 2")
-        db.add_game(1, 11, 620, "Portal 2")
-        self.assertEqual(
-            db.get_wishlist(),
-            [("Portal 2", "steam", "https://store.steampowered.com/app/620/")],
-        )
+        db.add_game(0, 1, 620, "portal 2")
+        db.add_game(0, 1, 1245620, "Elden Ring")
+        db.add_game(0, 1, 413150, "Stardew Valley")
+        games = [row[0] for row in db.get_wishlist(1)]
+        self.assertEqual(games, ["Elden Ring", "portal 2", "Stardew Valley"])
 
     def test_other_stores_also_appear(self):
-        with closing(sqlite3.connect(self.path)) as conn:
+        with closing(sqlite3.connect(db.DATABASE_PATH)) as conn:
             with conn:
                 conn.execute(
                     "INSERT INTO wishlist (discord_user_id, game, store, link) VALUES (?, ?, ?, ?)",
-                    ("10", "An Epic Game", "epic", "https://store.epicgames.com/example"),
+                    ("1", "Hades", "gog", "https://www.gog.com/game/hades"),
                 )
+        rows = db.get_wishlist(1)
+        self.assertEqual(rows[0][:2], ("Hades", "gog"))
 
-        self.assertEqual(
-            db.get_wishlist()[0][0:2],
-            ("An Epic Game", "epic")
-        )
 
 if __name__ == "__main__":
     unittest.main()

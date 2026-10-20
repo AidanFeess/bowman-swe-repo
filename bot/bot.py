@@ -47,22 +47,23 @@ async def wishlist(interaction: discord.Interaction, game: str):
     )
     await interaction.followup.send(message)
 
-@bot.tree.command(name="list", description="Show all games on shared wishlist")
+@bot.tree.command(name="list", description="Show the games on your wishlist")
 @app_commands.guild_only()
 async def list_wishlist(interaction: discord.Interaction):
     # Database calls are synchronous, run query off event loop
     await interaction.response.defer()
 
     try:
-        games = await asyncio.to_thread(db.get_wishlist)
+        # Only this user's games are loaded, so nobody sees anyone else's list
+        games = await asyncio.to_thread(db.get_wishlist, interaction.user.id)
     except Exception as e: # if wishlist cant be loaded
         print(f"wishlist list error: {e}")
-        await interaction.followup.send("Sorry, I couldn't load the wishlist right now.")
+        await interaction.followup.send("Sorry, I couldn't load your wishlist right now.")
         return
 
     if not games: # no games in list
         embed = discord.Embed(
-            title="Game Wishlist",
+            title="Your Wishlist",
             description="No games yet! Use `/wishlist` to add one.",
             color=discord.Color.blurple(),
         )
@@ -94,7 +95,7 @@ async def list_wishlist(interaction: discord.Interaction):
     # final message
     for page_number, description in enumerate(pages, start=1):
         embed = discord.Embed(
-            title="Game Wishlist",
+            title="Your Wishlist",
             description=description,
             color=discord.Color.blurple(),
         )
