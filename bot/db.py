@@ -20,3 +20,14 @@ def add_game(guild_id, user_id, app_id, name):
         return True
     except sqlite3.IntegrityError:
         return False
+
+def get_wishlist():
+    " Returns  games shared in the wishlist"
+    with closing(sqlite3.connect(DATABASE_PATH)) as conn:
+        return conn.execute(
+            """
+            SELECT DISTINCT game, store, link
+            FROM wishlist
+            ORDER BY game COLLATE NOCASE, store, link
+            """
+        ).fetchall()
