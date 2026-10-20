@@ -39,10 +39,10 @@ class WishlistTests(unittest.TestCase):
         add_game.assert_not_called()
 
     @patch("handler.db.add_game")
-    @patch("handler.steam.get_app_id", return_value=None)
-    def test_empty_input(self, get_id, add_game):
+    def test_empty_input(self, add_game):
         status, msg = handler.add_to_wishlist(1, 2, "   ")
         self.assertEqual(status, "bad_link")
+        add_game.assert_not_called()
 
     @patch("handler.db.add_game")
     @patch("handler.steam.get_game_name", side_effect=ConnectionError("steam down"))
@@ -51,6 +51,33 @@ class WishlistTests(unittest.TestCase):
         status, msg = handler.add_to_wishlist(1, 2, "https://store.steampowered.com/app/620/")
         self.assertEqual(status, "error")
         add_game.assert_not_called()
+
+    @patch("handler.db.add_game", return_value=True)
+    @patch("handler.steam.search_game", return_value=(620, "Portal 2"))
+    def test_name_found_is_added(self, search, add_game):
+        status, msg = handler.add_to_wishlist(1, 2, "portal 2")
+        self.assertEqual(status, "added")
+        self.assertIn("Portal 2", msg)
+        add_game.assert_called_once_with(1, 2, 620, "Portal 2")
+
+    @patch("handler.db.add_game")
+    @patch("handler.steam.search_game", return_value=None)
+    def test_name_not_found(self, search, add_game):
+        status, msg = handler.add_to_wishlist(1, 2, "asdfghjkl")
+        self.assertEqual(status, "not_found")
+        add_game.assert_not_called()
+
+    @patch("handler.db.add_game", return_value=False)
+    @patch("handler.steam.search_game", return_value=(620, "Portal 2"))
+    def test_name_already_on_wishlist(self, search, add_game):
+        status, msg = handler.add_to_wishlist(1, 2, "portal 2")
+        self.assertEqual(status, "duplicate")
+
+    @patch("handler.db.add_game")
+    @patch("handler.steam.search_game", side_effect=ConnectionError("steam down"))
+    def test_name_search_error_does_not_crash(self, search, add_game):
+        status, msg = handler.add_to_wishlist(1, 2, "portal")
+        self.assertEqual(status, "error")
 
 
 if __name__ == "__main__":

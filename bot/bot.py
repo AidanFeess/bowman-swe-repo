@@ -37,15 +37,72 @@ async def on_ready():
 
 
 @bot.tree.command(name="wishlist", description="Add a Steam game to your wishlist")
-@app_commands.describe(link="Steam store link, e.g. https://store.steampowered.com/app/620/")
+@app_commands.describe(game="Game name or Steam store link, e.g. Portal 2")
 @app_commands.guild_only()
-async def wishlist(interaction: discord.Interaction, link: str):
+async def wishlist(interaction: discord.Interaction, game: str):
     # Steam lookups can take longer than Discord's 3 second limit, so acknowledge first
     await interaction.response.defer()
     status, message = await asyncio.to_thread(
-        handler.add_to_wishlist, interaction.guild_id, interaction.user.id, link
+        handler.add_to_wishlist, interaction.guild_id, interaction.user.id, game
     )
     await interaction.followup.send(message)
 
+@bot.tree.command(name="list", description="Show all games on shared wishlist")
+@app_commands.guild_only()
+async def list_wishlist(interaction: discord.Interaction):
+    # Database calls are synchronous, run query off event loop
+    await interaction.response.defer()
+
+    try:
+        games = await asyncio.to_thread(db.get_wishlist)
+    except Exception as e: # if wishlist cant be loaded
+        print(f"wishlist list error: {e}")
+        await interaction.followup.send("Sorry, I couldn't load the wishlist right now.")
+        return
+
+    if not games: # no games in list
+        embed = discord.Embed(
+            title="Game Wishlist",
+            description="No games yet! Use `/wishlist` to add one.",
+            color=discord.Color.blurple(),
+        )
+        await interaction.followup.send(embed=embed)
+        return
+
+    # Every row comes from wishlist.db: (game name, store, store link).
+    # formatting
+    lines = []
+    for number, (game, store, link) in enumerate(games, start=1):
+        safe_name = discord.utils.escape_markdown(game)
+        lines.append(f"**{number}. {safe_name}** — [View on {store.upper()}]({link})")
+
+    # Discord embeds have a 4096-character description limit. (handling large wishlist items)
+    # making the print out wishlist
+    pages = []
+    current_lines = []
+    current_length = 0
+    for line in lines:
+        if current_lines and current_length + len(line) + 1 > 3500:
+            pages.append("\n".join(current_lines))
+            current_lines = []
+            current_length = 0
+        current_lines.append(line)
+        current_length += len(line) + 1
+    if current_lines:
+        pages.append("\n".join(current_lines))
+
+    # final message
+    for page_number, description in enumerate(pages, start=1):
+        embed = discord.Embed(
+            title="Game Wishlist",
+            description=description,
+            color=discord.Color.blurple(),
+        )
+        embed.set_footer(
+            text=f"{len(games)} game(s) • Page {page_number}/{len(pages)}"
+        )
+        await interaction.followup.send(
+            embed=embed, allowed_mentions=discord.AllowedMentions.none()
+        )
 
 bot.run(TOKEN)
