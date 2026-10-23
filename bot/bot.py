@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 
 import db
 import handler
+import pricing
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -106,4 +107,40 @@ async def list_wishlist(interaction: discord.Interaction):
             embed=embed, allowed_mentions=discord.AllowedMentions.none()
         )
 
-bot.run(TOKEN)
+@bot.tree.command(name="pullpricing", description="Compare a game's prices across stores")
+@app_commands.describe(link="Steam store link, e.g. https://store.steampowered.com/app/620/")
+async def pullpricing(interaction: discord.Interaction, link: str):
+    # Keep this command available in DMs so it can return the required message.
+    if interaction.guild_id is None:
+        await interaction.response.send_message(pricing.SERVER_ONLY, ephemeral=True)
+        return
+    app_id = pricing.parse_steam_link(link)
+    if app_id is None:
+        await interaction.response.send_message(pricing.INVALID_LINK, ephemeral=True)
+        return
+
+    await interaction.response.defer()
+    try:
+        result = await pricing.lookup_prices(app_id)
+    except pricing.PriceSourceError:
+        await interaction.followup.send(pricing.UNAVAILABLE)
+        return
+    if not result.offers:
+        await interaction.followup.send(pricing.NO_PRICES)
+        return
+
+    embed = discord.Embed(
+        title=discord.utils.escape_markdown(result.name)[:256],
+        description="Prices in USD (US region).",
+        color=discord.Color.blurple(),
+    )
+    for offer in result.offers:
+        embed.add_field(name=offer.store, value=pricing.format_offer(offer), inline=False)
+    embed.set_footer(text="Sources: Steam and CheapShark • Prices can change before checkout")
+    await interaction.followup.send(
+        embed=embed, allowed_mentions=discord.AllowedMentions.none()
+    )
+
+
+if __name__ == "__main__":
+    bot.run(TOKEN)
