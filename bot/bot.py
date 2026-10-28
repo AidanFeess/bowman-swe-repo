@@ -1,5 +1,6 @@
 import asyncio
 import os
+from pathlib import Path
 
 import discord
 from discord import app_commands
@@ -8,16 +9,79 @@ from dotenv import load_dotenv
 import db
 import handler
 import pricing
+import ratelimit
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 TEST_GUILD_ID = os.getenv("TEST_GUILD_ID")
 
+# Picture posted when someone floods the bot with commands
+SLOW_DOWN_IMAGE = Path(__file__).resolve().parent / "slow_down.png"
+
+# A user is warned at the 7th run of the same command in 60 seconds (or 6 commands in 10 seconds).
+# After the warning only 2 more are allowed for a minute, then they are blocked for 10 seconds.
+# 30 commands per 10 seconds for everyone together.
+limiter = ratelimit.RateLimiter()
+_background_tasks = set()
+
+
+async def send_heads_up(interaction):
+    # Plain message in the channel before the block, the command itself still runs
+    try:
+        await interaction.channel.send(
+            f"Slow down, {interaction.user.mention}! Keep spamming and you will be blocked.",
+            allowed_mentions=discord.AllowedMentions(users=[interaction.user]),
+        )
+    except (AttributeError, discord.HTTPException) as e:
+        print(f"heads-up failed: {e}")
+
+
+async def send_slow_down(interaction, seconds):
+    text = f"Slow down, {interaction.user.mention}! You are blocked for {seconds} seconds."
+    options = {"allowed_mentions": discord.AllowedMentions.none()}
+    if SLOW_DOWN_IMAGE.exists():
+        options["file"] = discord.File(SLOW_DOWN_IMAGE)
+    await interaction.response.send_message(text, **options)
+
+
+class GameNightTree(app_commands.CommandTree):
+    async def interaction_check(self, interaction):
+        # Runs before every command. Suggestions while typing are not commands, so they are not counted.
+        if interaction.type is not discord.InteractionType.application_command:
+            return True
+
+        command = str(interaction.data.get("name", ""))
+        status, seconds = limiter.check(interaction.user.id, command)
+        if status == "slow":  # warned, but the command still runs
+            print(f"rate limit: user {interaction.user.id} used /{command} -> slow")
+            task = asyncio.create_task(send_heads_up(interaction))
+            _background_tasks.add(task)
+            task.add_done_callback(_background_tasks.discard)
+            return True
+        if status == "ok":
+            return True
+        print(f"rate limit: user {interaction.user.id} used /{command} -> {status}")
+
+        try:
+            if status == "block":  # just went over the limit, post the picture once
+                await send_slow_down(interaction, seconds)
+            elif status == "blocked":  # still blocked, reply quietly so the bot does not spam too
+                await interaction.response.send_message(
+                    f"Slow down! Try again in {seconds} seconds.", ephemeral=True
+                )
+            else:  # the whole bot is too busy
+                await interaction.response.send_message(
+                    "The bot is busy right now, try again in a few seconds.", ephemeral=True
+                )
+        except discord.HTTPException as e:
+            print(f"rate limit reply failed: {e}")
+        return False  # the command does not run
+
 
 class GameNightBot(discord.Client):
     def __init__(self):
         super().__init__(intents=discord.Intents.default())
-        self.tree = app_commands.CommandTree(self)
+        self.tree = GameNightTree(self)
 
     async def setup_hook(self):
         db.init_db()
@@ -140,6 +204,50 @@ async def pullpricing(interaction: discord.Interaction, link: str):
     await interaction.followup.send(
         embed=embed, allowed_mentions=discord.AllowedMentions.none()
     )
+
+@bot.tree.command(name="remove", description="Remove a game from your wishlist")
+@app_commands.describe(game="Name of the game to remove. Pick one from your wishlist.")
+async def remove(interaction: discord.Interaction, game: str):
+    # Keep this command available in DMs so it can return the required message.
+    if interaction.guild_id is None:
+        await interaction.response.send_message("Use this command in a server.")
+        return
+
+    # Database calls are synchronous, run them off the event loop
+    await interaction.response.defer()
+    try:
+        removed = await asyncio.to_thread(db.remove_game, interaction.user.id, game)
+    except Exception as e:
+        print(f"remove error: {e}")
+        await interaction.followup.send("Sorry, I couldn't remove that game right now.")
+        return
+
+    if removed is None:
+        await interaction.followup.send("That game is not on your wishlist.")
+        return
+
+    safe_name = discord.utils.escape_markdown(removed)
+    await interaction.followup.send(
+        f"Removed {safe_name} from your wishlist.",
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+@remove.autocomplete("game")
+async def remove_autocomplete(interaction: discord.Interaction, current: str):
+    # Suggest the games on this user's own wishlist as they type
+    try:
+        games = await asyncio.to_thread(db.get_wishlist, interaction.user.id)
+    except Exception as e:
+        print(f"remove autocomplete error: {e}")
+        return []
+    current = current.lower()
+    names = []
+    for name, store, link in games:
+        name = name[:100]  # Discord allows at most 100 characters per suggestion
+        if current in name.lower() and name not in names:
+            names.append(name)
+    return [app_commands.Choice(name=name, value=name) for name in names[:25]]
 
 
 if __name__ == "__main__":
