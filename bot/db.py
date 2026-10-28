@@ -36,3 +36,26 @@ def get_wishlist(user_id):
             """,
             (str(user_id),),
         ).fetchall()
+
+
+def remove_game(user_id, name):
+    """Removes this user's game with this name, ignoring capitalization.
+    If the same game is saved under more than one store, every copy is removed.
+    Returns the saved name of the game, or None if the user did not have it.
+    Only this user's rows are touched, so other users keep the game."""
+    name = (name or "").strip()
+    if not name:
+        return None
+    with closing(sqlite3.connect(DATABASE_PATH)) as conn:
+        with conn:
+            rows = conn.execute(
+                "SELECT game FROM wishlist WHERE discord_user_id = ? AND game = ? COLLATE NOCASE",
+                (str(user_id), name),
+            ).fetchall()
+            if not rows:
+                return None
+            conn.execute(
+                "DELETE FROM wishlist WHERE discord_user_id = ? AND game = ? COLLATE NOCASE",
+                (str(user_id), name),
+            )
+    return rows[0][0]
