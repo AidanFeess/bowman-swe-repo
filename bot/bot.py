@@ -205,7 +205,6 @@ async def pullpricing(interaction: discord.Interaction, link: str):
         embed=embed, allowed_mentions=discord.AllowedMentions.none()
     )
 
-
 @bot.tree.command(name="remove", description="Remove a game from your wishlist")
 @app_commands.describe(game="Name of the game to remove. Pick one from your wishlist.")
 async def remove(interaction: discord.Interaction, game: str):
