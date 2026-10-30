@@ -6,6 +6,7 @@ import logging
 import os
 import sqlite3
 from contextlib import closing
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import discord
 from discord import app_commands
@@ -30,10 +31,56 @@ def get_saved_games():
         ).fetchall()
 
 
+DEFAULT_TIMEZONE = "America/Chicago"
+
+
+def current_day(tz):
+    """Today's date in the digest's time zone as text, used to ping each user once per day."""
+    return datetime.datetime.now(tz).date().isoformat()
+
+
+def ensure_notification_table():
+    """Remember who was pinged about which game, and on which day."""
+    with closing(sqlite3.connect(db.DATABASE_PATH)) as connection:
+        with connection:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS digest_notifications (
+                    discord_user_id TEXT NOT NULL,
+                    app_id INTEGER NOT NULL,
+                    last_notified TEXT NOT NULL,
+                    PRIMARY KEY (discord_user_id, app_id)
+                )
+                """
+            )
+
+
+def get_notified_today(today):
+    """Return the (user id, app id) pairs that were already pinged today."""
+    with closing(sqlite3.connect(db.DATABASE_PATH)) as connection:
+        rows = connection.execute(
+            "SELECT discord_user_id, app_id FROM digest_notifications WHERE last_notified = ?",
+            (today,),
+        ).fetchall()
+    return {(int(user_id), app_id) for user_id, app_id in rows}
+
+
+def mark_notified(user_ids, app_id, today):
+    """Record that these users were pinged about this game today."""
+    with closing(sqlite3.connect(db.DATABASE_PATH)) as connection:
+        with connection:
+            connection.executemany(
+                "INSERT OR REPLACE INTO digest_notifications "
+                "(discord_user_id, app_id, last_notified) VALUES (?, ?, ?)",
+                [(str(user_id), app_id, today) for user_id in user_ids],
+            )
+
+
 class Digest:
     def __init__(self, bot):
         self.bot = bot
         self.channel_id = None
+        self.tz = ZoneInfo(DEFAULT_TIMEZONE)
 
         # Prevent manual and scheduled digests from overlapping in one server.
         self.server_locks = {}
@@ -51,17 +98,27 @@ class Digest:
         channel_setting = os.getenv("DIGEST_CHANNEL_ID", "").strip()
 
         if channel_setting:
-            self.channel_id = int(channel_setting)
+            # The daily post time is in the digest time zone (Central by default), so
+            # 16:00 stays 4 PM through daylight saving changes.
+            time_setting = os.getenv("DIGEST_TIME", "20:00").strip()
+            zone_setting = os.getenv("DIGEST_TIMEZONE", DEFAULT_TIMEZONE).strip()
 
-            # Example: 15:00 means 3 PM UTC.
-            time_setting = os.getenv("DIGEST_TIME_UTC", "15:00").strip()
-            hour, minute = map(int, time_setting.split(":"))
+            try:
+                self.channel_id = int(channel_setting)
+                self.tz = ZoneInfo(zone_setting)
+                hour, minute = map(int, time_setting.split(":"))
+                run_time = datetime.time(hour=hour, minute=minute, tzinfo=self.tz)
+            except (ValueError, ZoneInfoNotFoundError):
+                # A typo in the settings should not stop the bot from starting.
+                logger.error(
+                    "Ignoring the digest schedule: DIGEST_CHANNEL_ID must be a number, "
+                    "DIGEST_TIME must look like 16:00, and DIGEST_TIMEZONE must be a "
+                    "name like America/Chicago"
+                )
+                self.channel_id = None
+                self.bot.tree.add_command(self.command)
+                return
 
-            run_time = datetime.time(
-                hour=hour,
-                minute=minute,
-                tzinfo=datetime.timezone.utc,
-            )
             self.daily_digest.change_interval(time=run_time)
 
         self.bot.tree.add_command(self.command)
@@ -107,6 +164,9 @@ class Digest:
             await self._build_and_send(guild, send)
 
     async def _build_and_send(self, guild, send):
+        await asyncio.to_thread(ensure_notification_table)
+        today = current_day(self.tz)
+        already_pinged = await asyncio.to_thread(get_notified_today, today)
         rows = await asyncio.to_thread(get_saved_games)
 
         # Find which saved users still belong to this server.
@@ -175,7 +235,7 @@ class Digest:
 
             if sale_offers:
                 sale_games.append(
-                    (result.name, sale_offers, sorted(interested_users))
+                    (app_id, result.name, sale_offers, sorted(interested_users))
                 )
 
         if sale_games:
@@ -206,7 +266,13 @@ class Digest:
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
-        for name, offers, user_ids in sale_games:
+        for app_id, name, offers, user_ids in sale_games:
+            # Each user is pinged about a game once per day while it stays on sale.
+            to_ping = [
+                user_id for user_id in user_ids
+                if (user_id, app_id) not in already_pinged
+            ]
+
             # One embed per game keeps the information together.
             embed = discord.Embed(
                 title=discord.utils.escape_markdown(name)[:256],
@@ -225,10 +291,19 @@ class Digest:
                 text="Sources: Steam and CheapShark • Check prices before buying"
             )
 
+            if not to_ping:
+                # Everyone was already pinged today, so show the sale quietly.
+                await send(
+                    "Everyone who wants this game was already pinged today.",
+                    embed=embed,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                continue
+
             # Put mentions in ordinary message content so they can notify users.
             # Limit each batch to 50 users to stay within Discord limits.
-            for start in range(0, len(user_ids), 50):
-                batch = user_ids[start:start + 50]
+            for start in range(0, len(to_ping), 50):
+                batch = to_ping[start:start + 50]
 
                 content = "Sale alert: " + " ".join(
                     f"<@{user_id}>" for user_id in batch
@@ -248,6 +323,9 @@ class Digest:
 
                 # Show the game's details with each batch of recipients.
                 await send(content, embed=embed, **options)
+
+                # Record the ping only after it was sent, so a failed send is retried.
+                await asyncio.to_thread(mark_notified, batch, app_id, today)
 
     @tasks.loop(hours=24)
     async def daily_digest(self):
