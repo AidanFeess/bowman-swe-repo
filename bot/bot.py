@@ -7,6 +7,7 @@ from discord import app_commands
 from dotenv import load_dotenv
 
 import db
+import digest
 import handler
 import pricing
 import ratelimit
@@ -85,6 +86,7 @@ class GameNightBot(discord.Client):
 
     async def setup_hook(self):
         db.init_db()
+        self.digest = digest.setup(self)  # adds /digest, and the daily schedule if it is configured
         if TEST_GUILD_ID:
             guild = discord.Object(id=int(TEST_GUILD_ID))
             self.tree.copy_global_to(guild=guild)
