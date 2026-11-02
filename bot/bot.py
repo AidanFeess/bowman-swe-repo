@@ -7,9 +7,11 @@ from discord import app_commands
 from dotenv import load_dotenv
 
 import db
+import digest
 import handler
 import pricing
 import ratelimit
+import seasonal
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -85,6 +87,7 @@ class GameNightBot(discord.Client):
 
     async def setup_hook(self):
         db.init_db()
+        self.digest = digest.setup(self)  # adds /digest, and the daily schedule if it is configured
         if TEST_GUILD_ID:
             guild = discord.Object(id=int(TEST_GUILD_ID))
             self.tree.copy_global_to(guild=guild)
@@ -232,6 +235,10 @@ async def remove(interaction: discord.Interaction, game: str):
         allowed_mentions=discord.AllowedMentions.none(),
     )
 
+@bot.tree.command(name="seasonal", description="See how long until the next Steam seasonal sale")
+async def seasonal_command(interaction: discord.Interaction):
+    # Needs no database or web lookup, so it replies right away and only to the person who asked
+    await interaction.response.send_message(embed=seasonal.build_embed(), ephemeral=True)
 
 @remove.autocomplete("game")
 async def remove_autocomplete(interaction: discord.Interaction, current: str):
