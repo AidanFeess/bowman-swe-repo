@@ -11,6 +11,7 @@ import digest
 import handler
 import pricing
 import ratelimit
+import seasonal
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -234,6 +235,10 @@ async def remove(interaction: discord.Interaction, game: str):
         allowed_mentions=discord.AllowedMentions.none(),
     )
 
+@bot.tree.command(name="seasonal", description="See how long until the next Steam seasonal sale")
+async def seasonal_command(interaction: discord.Interaction):
+    # Needs no database or web lookup, so it replies right away and only to the person who asked
+    await interaction.response.send_message(embed=seasonal.build_embed(), ephemeral=True)
 
 @remove.autocomplete("game")
 async def remove_autocomplete(interaction: discord.Interaction, current: str):
