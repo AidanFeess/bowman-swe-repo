@@ -301,6 +301,17 @@ class Digest:
         today = current_day(self.tz)
         rows = await asyncio.to_thread(get_saved_games, guild.id)
 
+        
+        # Count unique users who want each game across the server
+        wishlist_counts = {}
+
+        for user_id, link in rows:
+            app_id = pricing.parse_steam_link(link)
+
+            if app_id is not None:
+                wishlist_counts.setdefault(app_id, set()).add(int(user_id))
+
+
         if personal:
             # Someone asking for their own sales always gets an answer. The send is still
             # recorded, so the daily run does not send the same sale again today.
@@ -402,7 +413,7 @@ class Digest:
         users_with_sales = set()
 
         for app_id, name, offers, interested, steam_sale_end in sale_games:
-            embed = build_embed(name, offers, len(interested), steam_sale_end)
+            embed = build_embed(name, offers, len(wishlist_counts.get(app_id, set())), steam_sale_end)
 
             for user_id in interested:
                 users_with_sales.add(user_id)
