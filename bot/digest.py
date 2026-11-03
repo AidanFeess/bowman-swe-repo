@@ -15,6 +15,9 @@ from discord.ext import tasks
 import db
 import pricing
 
+import json
+import aiohttp
+
 
 logger = logging.getLogger(__name__)
 
@@ -75,22 +78,109 @@ def mark_notified(user_id, app_ids, today):
                 [(str(user_id), app_id, today) for app_id in app_ids],
             )
 
+# Function to get the steam sale end date
+async def get_steam_sale_end(app_id, offer):
+    """Get the end time for a specific Steam discount."""
+    url = "https://api.steampowered.com/IStoreBrowseService/GetItems/v1/"
 
-def build_embed(name, offers, wanted_by):
-    """One card per game with the sale prices."""
+    request = {
+        "ids": [{"appid": app_id}],
+        "context": {
+            "language": "english",
+            "country_code": "US",
+            "steam_realm": "1"
+        },
+        "data_request": {
+            "include_all_purchase_options": True,
+            "include_best_purchase_option": True
+        }
+    }
+
+    try:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=5)
+        ) as session:
+            async with session.get(
+                url, params={"input_json": json.dumps(request)}
+            ) as response:
+                response.raise_for_status()
+                data = await response.json()
+
+        items = data.get("response", {}).get("store_items", [])
+        now = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
+
+        for item in items:
+            if item.get("appid") != app_id:
+                continue
+
+            options = item.get("purchase_options") or []
+            if not isinstance(options, list):
+                continue
+
+            best = item.get("best_purchase_option")
+            if isinstance(best, dict):
+                options.append(best)
+
+            for option in options:
+                if not isinstance(option, dict):
+                    continue
+
+                # Only use the expiration of the matching price
+                try:
+                    if (
+                        int(option["final_price_in_cents"]) != int(offer.current * 100)
+                        or int(option["original_price_in_cents"]) != int(offer.original * 100)
+                    ):
+                        continue
+                except (KeyError, TypeError, ValueError):
+                    continue
+
+                expirations = [
+                    discount["discount_end_date"]
+                    for discount in option.get("active_discounts", [])
+                    if isinstance(discount, dict)
+                    and type(discount.get("discount_end_date")) is int
+                    and discount["discount_end_date"] > now
+                ]
+
+                if expirations:
+                    return min(expirations)
+
+    except (aiohttp.ClientError, asyncio.TimeoutError,
+            ValueError, TypeError, AttributeError):
+        return None
+
+    return None
+
+# Added expiration time to each card generated
+def build_embed(name, offers, wanted_by, steam_sale_end=None):
+    """One card per game with sale prices and expiration times."""
     embed = discord.Embed(
         title=discord.utils.escape_markdown(name)[:256],
         description=f"**{wanted_by} user(s)** want this game.",
         color=discord.Color.green(),
     )
+
     for offer in offers:
+        value = pricing.format_offer(offer)
+
+        if offer.store == "Steam" and offer.current < offer.original:
+            if steam_sale_end is not None:
+                value += f"\nSale ends: <t:{steam_sale_end}:R>"
+            else:
+                value += "\nSale end time: unavailable"
+
         embed.add_field(
             name=offer.store,
-            value=pricing.format_offer(offer),
+            value=value,
             inline=False,
         )
-    embed.set_footer(text="Sources: Steam and CheapShark • Check prices before buying")
+
+    embed.set_footer(
+        text="Sources: Steam and CheapShark • Check prices before buying"
+    )
     return embed
+
 
 
 class Digest:
@@ -262,18 +352,36 @@ class Digest:
                 if offer.current < offer.original
             ]
 
+            
             if sale_offers:
-                sale_games.append(
-                    (app_id, result.name, sale_offers, sorted(interested_users))
+                steam_offer = next(
+                    (offer for offer in sale_offers if offer.store == "Steam"),
+                    None
                 )
+
+                steam_sale_end = None
+
+                if steam_offer is not None:
+                    steam_sale_end = await get_steam_sale_end(app_id, steam_offer)
+
+                sale_games.append(
+                    (
+                        app_id,
+                        result.name,
+                        sale_offers,
+                        sorted(interested_users),
+                        steam_sale_end
+                    )
+                )
+
 
         # Collect each user's own sale games. A game they were already messaged
         # about today is skipped, so each user hears about a sale once per day.
         per_user = {}
         users_with_sales = set()
 
-        for app_id, name, offers, interested in sale_games:
-            embed = build_embed(name, offers, len(interested))
+        for app_id, name, offers, interested, steam_sale_end in sale_games:
+            embed = build_embed(name, offers, len(interested), steam_sale_end)
 
             for user_id in interested:
                 users_with_sales.add(user_id)
