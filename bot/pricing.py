@@ -1,4 +1,4 @@
-"""Game-name and Steam-link price comparisons, independent of wishlists and Discord."""
+"""Price comparisons by Steam link or game name, independent of wishlists and Discord."""
 
 import asyncio
 from dataclasses import dataclass
@@ -19,7 +19,7 @@ STEAM_URL = "https://store.steampowered.com/api/appdetails"
 SEARCH_URL = "https://store.steampowered.com/api/storesearch/"
 GAMES_URL = "https://www.cheapshark.com/api/1.0/games"
 USER_AGENT = "GameNightDealTracker/1.0 (https://github.com/AidanFeess/bowman-swe-repo)"
-# CheapShark store IDs. Links must be from Steam; names are resolved on Steam.
+# CheapShark store IDs. Input links are limited to Steam; Epic and GOG are comparison stores.
 SUPPORTED_STORES = {"1": "Steam", "25": "Epic Games Store", "7": "GOG"}
 
 
@@ -28,7 +28,7 @@ class PriceSourceError(Exception):
 
 
 class GameNotFound(Exception):
-    """Steam's name search succeeded but returned no games."""
+    """The Steam search worked, but no game matched the name."""
 
 
 @dataclass(frozen=True)
@@ -53,6 +53,18 @@ class PriceResult:
     offers: tuple[Offer, ...] = ()
 
 
+def looks_like_link(text):
+    """True when the input is meant as a web address, so it is checked as a link and not searched as a name."""
+    if not isinstance(text, str):
+        return False
+    text = text.strip()
+    if "://" in text or text.startswith("//"):
+        return True
+    if any(char.isspace() for char in text):
+        return False  # game names have spaces, and a link never does
+    return bool(re.match(r"(?i)www\.", text) or re.match(r"[\w-]+(\.[\w-]+)+/", text))
+
+
 def parse_steam_link(text):
     """Accept real Steam app URLs, never a substring or a lookalike hostname."""
     if not isinstance(text, str):
@@ -72,12 +84,6 @@ def parse_steam_link(text):
         return app_id if 0 < app_id <= 4294967295 else None
     except ValueError:
         return None
-
-
-def looks_like_link(text):
-    """Keep malformed or unsupported URLs out of the game-name search."""
-    return bool(re.match(r"(?:[a-z][a-z0-9+.-]*://|//|www\.)", text, re.IGNORECASE)
-                or "steampowered.com" in text.lower())
 
 
 def _money(value):
@@ -118,98 +124,106 @@ async def _get_json(session, url, params):
         return await response.json()
 
 
-async def _search_app_id(session, name):
-    """Prefer a case-insensitive exact title, otherwise Steam's first app result."""
-    payload = await _get_json(session, SEARCH_URL, {
-        "term": name, "cc": "us", "l": "english",
-    })
+async def _find_app_id(session, name):
+    """Search Steam by name. An exact title wins, otherwise the top game result is used."""
+    payload = await _get_json(session, SEARCH_URL, {"term": name, "cc": "us", "l": "english"})
     if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
         raise PriceSourceError("Invalid Steam search response")
+
     games = []
     for item in payload["items"]:
         if not isinstance(item, dict):
-            raise PriceSourceError("Invalid Steam search item")
-        if item.get("type", "app") != "app":
-            continue
+            raise PriceSourceError("Invalid Steam search result")
         app_id, title = item.get("id"), item.get("name")
-        if (not isinstance(app_id, int) or isinstance(app_id, bool)
-                or not 0 < app_id <= 4294967295
+        # A damaged result is a source failure, not proof that the game does not exist.
+        if (type(app_id) is not int or not 0 < app_id <= 4294967295
                 or not isinstance(title, str) or not title.strip()):
-            raise PriceSourceError("Invalid Steam search game")
-        games.append((app_id, title))
+            raise PriceSourceError("Invalid Steam search result")
+        if item.get("type") == "app":  # skip bundles, packages, and other non-game results
+            games.append((app_id, title))
+
     if not games:
         raise GameNotFound()
+    wanted = name.strip().casefold()
     for app_id, title in games:
-        if title.strip().casefold() == name.casefold():
+        if title.strip().casefold() == wanted:
             return app_id
     return games[0][0]
 
 
-async def _lookup(game):
-    async with aiohttp.ClientSession(
-        headers={"User-Agent": USER_AGENT},
-        timeout=aiohttp.ClientTimeout(total=LOOKUP_TIMEOUT),
-    ) as session:
-        # Search uses this same session and the outer lookup's remaining budget.
-        app_id = await _search_app_id(session, game) if isinstance(game, str) else game
-        payload = await _get_json(session, STEAM_URL, {
-            "appids": app_id, "filters": "basic,price_overview", "cc": "us", "l": "english",
-        })
-        if not isinstance(payload, dict) or not isinstance(payload.get(str(app_id)), dict):
-            raise PriceSourceError("Invalid Steam response")
-        entry = payload[str(app_id)]
-        if entry.get("success") is False:
-            return PriceResult("")
-        data = entry.get("data")
-        if (entry.get("success") is not True or not isinstance(data, dict)
-                or not isinstance(data.get("name"), str) or not data["name"].strip()
-                or str(data.get("steam_appid")) != str(app_id)):
-            raise PriceSourceError("Invalid Steam game details")
+async def _lookup(session, app_id):
+    payload = await _get_json(session, STEAM_URL, {
+        "appids": app_id, "filters": "basic,price_overview", "cc": "us", "l": "english",
+    })
+    if not isinstance(payload, dict) or not isinstance(payload.get(str(app_id)), dict):
+        raise PriceSourceError("Invalid Steam response")
+    entry = payload[str(app_id)]
+    if entry.get("success") is False:
+        return PriceResult("")
+    data = entry.get("data")
+    if (entry.get("success") is not True or not isinstance(data, dict)
+            or not isinstance(data.get("name"), str) or not data["name"].strip()
+            or str(data.get("steam_appid")) != str(app_id)):
+        raise PriceSourceError("Invalid Steam game details")
 
-        offers = {}
-        steam_offer = _steam_offer(data, app_id)
-        if steam_offer:
-            offers["1"] = steam_offer
+    offers = {}
+    steam_offer = _steam_offer(data, app_id)
+    if steam_offer:
+        offers["1"] = steam_offer
 
-        games = await _get_json(session, GAMES_URL, {"steamAppID": app_id})
-        if not isinstance(games, list) or any(not isinstance(g, dict) for g in games):
-            raise PriceSourceError("Invalid CheapShark search response")
-        # Never fall back to fuzzy title matching or choose among ambiguous editions.
-        ids = {str(g["gameID"]) for g in games
-               if str(g.get("steamAppID")) == str(app_id)
-               and str(g.get("gameID", "")).isdigit()}
-        if len(ids) == 1:
-            game = await _get_json(session, GAMES_URL, {"id": ids.pop()})
-            if (not isinstance(game, dict) or not isinstance(game.get("info"), dict)
-                    or not isinstance(game.get("deals"), list)):
-                raise PriceSourceError("Invalid CheapShark game response")
-            if str(game["info"].get("steamAppID")) == str(app_id):
-                for deal in game["deals"]:
-                    if not isinstance(deal, dict):
-                        raise PriceSourceError("Invalid CheapShark deal")
-                    store_id = str(deal.get("storeID"))
-                    deal_id = deal.get("dealID")
-                    if (store_id not in SUPPORTED_STORES or not isinstance(deal_id, str)
-                            or not deal_id or len(deal_id) > 256):
-                        continue
-                    if store_id == "1" and steam_offer:
-                        continue  # Prefer Steam's current price over the aggregator's snapshot.
-                    # CheapShark IDs arrive URL encoded. Normalize once to avoid double encoding.
-                    link = "https://www.cheapshark.com/redirect?dealID=" + quote(unquote(deal_id), safe="")
-                    offer = _offer(SUPPORTED_STORES[store_id], deal.get("price"),
-                                   deal.get("retailPrice"), link)
-                    if offer and (store_id not in offers or offer.current < offers[store_id].current):
-                        offers[store_id] = offer
-        return PriceResult(data["name"], tuple(offers[s] for s in SUPPORTED_STORES if s in offers))
+    games = await _get_json(session, GAMES_URL, {"steamAppID": app_id})
+    if not isinstance(games, list) or any(not isinstance(g, dict) for g in games):
+        raise PriceSourceError("Invalid CheapShark search response")
+    # Never fall back to fuzzy title matching or choose among ambiguous editions.
+    ids = {str(g["gameID"]) for g in games
+           if str(g.get("steamAppID")) == str(app_id)
+           and str(g.get("gameID", "")).isdigit()}
+    if len(ids) == 1:
+        game = await _get_json(session, GAMES_URL, {"id": ids.pop()})
+        if (not isinstance(game, dict) or not isinstance(game.get("info"), dict)
+                or not isinstance(game.get("deals"), list)):
+            raise PriceSourceError("Invalid CheapShark game response")
+        if str(game["info"].get("steamAppID")) == str(app_id):
+            for deal in game["deals"]:
+                if not isinstance(deal, dict):
+                    raise PriceSourceError("Invalid CheapShark deal")
+                store_id = str(deal.get("storeID"))
+                deal_id = deal.get("dealID")
+                if (store_id not in SUPPORTED_STORES or not isinstance(deal_id, str)
+                        or not deal_id or len(deal_id) > 256):
+                    continue
+                if store_id == "1" and steam_offer:
+                    continue  # Prefer Steam's current price over the aggregator's snapshot.
+                # CheapShark IDs arrive URL encoded. Normalize once to avoid double encoding.
+                link = "https://www.cheapshark.com/redirect?dealID=" + quote(unquote(deal_id), safe="")
+                offer = _offer(SUPPORTED_STORES[store_id], deal.get("price"),
+                               deal.get("retailPrice"), link)
+                if offer and (store_id not in offers or offer.current < offers[store_id].current):
+                    offers[store_id] = offer
+    return PriceResult(data["name"], tuple(offers[s] for s in SUPPORTED_STORES if s in offers))
 
 
-async def lookup_prices(game):
-    """Price an app ID or name within one 10-second search-and-price deadline.
+async def _search_and_lookup(session, query):
+    if type(query) is int:
+        app_id = query
+    else:
+        if not isinstance(query, str) or not query.strip():
+            raise GameNotFound()
+        app_id = await _find_app_id(session, query.strip())
+    return await _lookup(session, app_id)
 
-    Integer IDs remain supported for Steam links and the daily digest.
-    """
+
+async def lookup_prices(query):
+    """Look up prices by Steam app ID (a number) or by game name (text).
+
+    One cancellable, 10-second budget covers the whole lookup, the search included, not each step.
+    The session is opened before the clock starts, so only the web requests use up the budget."""
     try:
-        return await asyncio.wait_for(_lookup(game), timeout=LOOKUP_TIMEOUT)
+        async with aiohttp.ClientSession(
+            headers={"User-Agent": USER_AGENT},
+            timeout=aiohttp.ClientTimeout(total=LOOKUP_TIMEOUT),
+        ) as session:
+            return await asyncio.wait_for(_search_and_lookup(session, query), timeout=LOOKUP_TIMEOUT)
     except (asyncio.TimeoutError, aiohttp.ClientError, ValueError) as exc:
         raise PriceSourceError("Price lookup failed") from exc
 
