@@ -148,64 +148,123 @@ async def wishlist(interaction: discord.Interaction, game: str):
     )
     await interaction.followup.send(message)
 
-@bot.tree.command(name="list", description="Show the games on your wishlist")
+
+@bot.tree.command(name="list", description="Show the server wishlist or a specific user's wishlist")
+@app_commands.describe(user="Select a server member (leave empty for the whole server)")
 @app_commands.guild_only()
-async def list_wishlist(interaction: discord.Interaction):
-    # Database calls are synchronous, run query off event loop
+async def list_wishlist(interaction: discord.Interaction, user: discord.Member | None = None):
+    if interaction.guild_id is None:
+        await interaction.response.send_message(
+            "Use this command in a server.",
+            ephemeral=True
+        )
+        return
+
+    if user is not None and (
+        not isinstance(user, discord.Member)
+        or user.guild.id != interaction.guild_id
+    ):
+        await interaction.response.send_message(
+            "Please select a valid member of this server.",
+            ephemeral=True
+        )
+        return
+
     await interaction.response.defer()
 
     try:
-        # Only this user's games are loaded, so nobody sees anyone else's list
-        games = await asyncio.to_thread(db.get_wishlist, interaction.user.id)
-    except Exception as e: # if wishlist cant be loaded
+        if user is None:
+            games = await asyncio.to_thread(
+                db.get_server_wishlist, interaction.guild_id
+            )
+            title = "Server Wishlist"
+        else:
+            games = await asyncio.to_thread(
+                db.get_wishlist, interaction.guild_id, user.id
+            )
+            title = f"{user.display_name}'s Wishlist"
+
+    except Exception as e:
         print(f"wishlist list error: {e}")
-        await interaction.followup.send("Sorry, I couldn't load your wishlist right now.")
+        await interaction.followup.send(
+            "Sorry, I couldn't load the wishlist right now."
+        )
         return
 
-    if not games: # no games in list
+    if not games:
+        if user is None:
+            message = "No games have been wishlisted in this server yet."
+        else:
+            message = f"{user.display_name} hasn't wishlisted any games yet."
+
         embed = discord.Embed(
-            title="Your Wishlist",
-            description="No games yet! Use `/wishlist` to add one.",
-            color=discord.Color.blurple(),
+            title=title,
+            description=message,
+            color=discord.Color.blurple()
         )
         await interaction.followup.send(embed=embed)
         return
 
-    # Every row comes from wishlist.db: (game name, store, store link).
-    # formatting
     lines = []
-    for number, (game, store, link) in enumerate(games, start=1):
-        safe_name = discord.utils.escape_markdown(game)
-        lines.append(f"**{number}. {safe_name}** — [View on {store.upper()}]({link})")
 
-    # Discord embeds have a 4096-character description limit. (handling large wishlist items)
-    # making the print out wishlist
+    if user is None:
+        for number, (game, store, link, count) in enumerate(games, 1):
+            safe_name = discord.utils.escape_markdown(game)
+            lines.append(
+                f"**{number}. {safe_name}** — "
+                f"[View on {store.upper()}]({link}) "
+                f"— **{count} user(s)**"
+            )
+
+        total_wishes = sum(row[3] for row in games)
+        footer = (
+            f"{len(games)} unique game(s) • "
+            f"{total_wishes} total wishlist entries"
+        )
+
+    else:
+        for number, (game, store, link) in enumerate(games, 1):
+            safe_name = discord.utils.escape_markdown(game)
+            lines.append(
+                f"**{number}. {safe_name}** — "
+                f"[View on {store.upper()}]({link})"
+            )
+
+        footer = f"{len(games)} game(s)"
+
+    # Split long lists into multiple embeds
     pages = []
     current_lines = []
     current_length = 0
+
     for line in lines:
         if current_lines and current_length + len(line) + 1 > 3500:
             pages.append("\n".join(current_lines))
             current_lines = []
             current_length = 0
+
         current_lines.append(line)
         current_length += len(line) + 1
+
     if current_lines:
         pages.append("\n".join(current_lines))
 
-    # final message
-    for page_number, description in enumerate(pages, start=1):
+    for page_number, description in enumerate(pages, 1):
         embed = discord.Embed(
-            title="Your Wishlist",
+            title=title,
             description=description,
-            color=discord.Color.blurple(),
+            color=discord.Color.blurple()
         )
+
         embed.set_footer(
-            text=f"{len(games)} game(s) • Page {page_number}/{len(pages)}"
+            text=f"{footer} • Page {page_number}/{len(pages)}"
         )
+
         await interaction.followup.send(
-            embed=embed, allowed_mentions=discord.AllowedMentions.none()
+            embed=embed,
+            allowed_mentions=discord.AllowedMentions.none()
         )
+
 
 @bot.tree.command(name="pullpricing", description="Compare a game's prices across stores")
 @app_commands.describe(link="Steam store link, e.g. https://store.steampowered.com/app/620/")
@@ -252,7 +311,7 @@ async def remove(interaction: discord.Interaction, game: str):
     # Database calls are synchronous, run them off the event loop
     await interaction.response.defer()
     try:
-        removed = await asyncio.to_thread(db.remove_game, interaction.user.id, game)
+        removed = await asyncio.to_thread(db.remove_game, interaction.guild_id, interaction.user.id, game)
     except Exception as e:
         print(f"remove error: {e}")
         await interaction.followup.send("Sorry, I couldn't remove that game right now.")
@@ -277,7 +336,10 @@ async def seasonal_command(interaction: discord.Interaction):
 async def remove_autocomplete(interaction: discord.Interaction, current: str):
     # Suggest the games on this user's own wishlist as they type
     try:
-        games = await asyncio.to_thread(db.get_wishlist, interaction.user.id)
+        if interaction.guild_id is None:
+            return []
+
+        games = await asyncio.to_thread(db.get_wishlist, interaction.guild_id, interaction.user.id)
     except Exception as e:
         print(f"remove autocomplete error: {e}")
         return []

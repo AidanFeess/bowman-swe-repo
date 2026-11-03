@@ -25,15 +25,17 @@ DEFAULT_TIMEZONE = "America/Chicago"
 GAMES_PER_MESSAGE = 5  # one DM holds up to 5 game cards, so it stays under Discord's size limits
 
 
-def get_saved_games():
-    """Read wishlist entries using the existing database connection path."""
+def get_saved_games(guild_id):
+    """Read wishlist entries belonging to this server."""
     with closing(sqlite3.connect(db.DATABASE_PATH)) as connection:
         return connection.execute(
             """
             SELECT discord_user_id, link
             FROM wishlist
+            WHERE discord_guild_id = ?
             ORDER BY id
-            """
+            """,
+            (str(guild_id),),
         ).fetchall()
 
 
@@ -42,41 +44,60 @@ def current_day(tz):
     return datetime.datetime.now(tz).date().isoformat()
 
 
+
 def ensure_notification_table():
-    """Remember who was messaged about which game, and on which day."""
+    """Remember notifications separately for every server."""
     with closing(sqlite3.connect(db.DATABASE_PATH)) as connection:
         with connection:
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS digest_notifications (
+                    discord_guild_id TEXT NOT NULL,
                     discord_user_id TEXT NOT NULL,
                     app_id INTEGER NOT NULL,
                     last_notified TEXT NOT NULL,
-                    PRIMARY KEY (discord_user_id, app_id)
+                    PRIMARY KEY (
+                        discord_guild_id,
+                        discord_user_id,
+                        app_id
+                    )
                 )
                 """
             )
 
 
-def get_notified_today(today):
-    """Return the (user id, app id) pairs that were already messaged today."""
+
+
+def get_notified_today(guild_id, today):
     with closing(sqlite3.connect(db.DATABASE_PATH)) as connection:
         rows = connection.execute(
-            "SELECT discord_user_id, app_id FROM digest_notifications WHERE last_notified = ?",
-            (today,),
+            """
+            SELECT discord_user_id, app_id
+            FROM digest_notifications
+            WHERE discord_guild_id = ?
+              AND last_notified = ?
+            """,
+            (str(guild_id), today),
         ).fetchall()
+
     return {(int(user_id), app_id) for user_id, app_id in rows}
 
 
-def mark_notified(user_id, app_ids, today):
-    """Record that this user was messaged about these games today."""
+def mark_notified(guild_id, user_id, app_ids, today):
     with closing(sqlite3.connect(db.DATABASE_PATH)) as connection:
         with connection:
             connection.executemany(
-                "INSERT OR REPLACE INTO digest_notifications "
-                "(discord_user_id, app_id, last_notified) VALUES (?, ?, ?)",
-                [(str(user_id), app_id, today) for app_id in app_ids],
+                """
+                INSERT OR REPLACE INTO digest_notifications
+                (discord_guild_id, discord_user_id, app_id, last_notified)
+                VALUES (?, ?, ?, ?)
+                """,
+                [
+                    (str(guild_id), str(user_id), app_id, today)
+                    for app_id in app_ids
+                ],
             )
+
 
 # Function to get the steam sale end date
 async def get_steam_sale_end(app_id, offer):
@@ -278,7 +299,7 @@ class Digest:
         personal = only_user_id is not None
         await asyncio.to_thread(ensure_notification_table)
         today = current_day(self.tz)
-        rows = await asyncio.to_thread(get_saved_games)
+        rows = await asyncio.to_thread(get_saved_games, guild.id)
 
         if personal:
             # Someone asking for their own sales always gets an answer. The send is still
@@ -286,7 +307,7 @@ class Digest:
             already_sent = set()
             rows = [row for row in rows if int(row[0]) == only_user_id]
         else:
-            already_sent = await asyncio.to_thread(get_notified_today, today)
+            already_sent = await asyncio.to_thread(get_notified_today, guild.id, today)
 
         # Find which saved users still belong to this server.
         # fetch_member works without enabling the full members-list intent.
@@ -421,7 +442,7 @@ class Digest:
 
                 # Record the message only after it was sent, so a failed send is retried.
                 await asyncio.to_thread(
-                    mark_notified, user_id, [app_id for app_id, _ in chunk], today
+                    mark_notified, guild.id, user_id, [app_id for app_id, _ in chunk], today
                 )
 
             if delivered:
