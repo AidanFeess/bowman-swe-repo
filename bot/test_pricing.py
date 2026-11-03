@@ -284,7 +284,7 @@ class NamePricingTests(unittest.IsolatedAsyncioTestCase):
 
         async def slow_sources(session, url, params):
             try:
-                await asyncio.sleep(0.04)
+                await asyncio.sleep(0.1)
                 if url == pricing.SEARCH_URL:
                     search_finished.set()
                     return self.search
@@ -295,7 +295,7 @@ class NamePricingTests(unittest.IsolatedAsyncioTestCase):
                 raise
 
         self.fetch.side_effect = slow_sources
-        with patch("pricing.LOOKUP_TIMEOUT", 0.06):
+        with patch("pricing.LOOKUP_TIMEOUT", 0.15):
             with self.assertRaises(pricing.PriceSourceError):
                 await pricing.lookup_prices("The Witcher 3: Wild Hunt")
         self.assertTrue(search_finished.is_set())
