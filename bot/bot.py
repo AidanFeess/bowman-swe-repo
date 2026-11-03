@@ -103,6 +103,39 @@ bot = GameNightBot()
 async def on_ready():
     print(f"Logged in as {bot.user}")
 
+# Formatting for /help message
+# Updates as new commands are added
+def build_help_embed():
+    lines = []
+
+    for command in sorted(bot.tree.get_commands(), key=lambda cmd: cmd.name):
+        if not isinstance(command, app_commands.Command):
+            continue
+
+        syntax = f"/{command.name}"
+
+        for parameter in command.parameters:
+            if parameter.required:
+                syntax += f" <{parameter.name}>"
+            else:
+                syntax += f" [{parameter.name}]"
+
+        lines.append(f"`{syntax}` — {command.description}")
+
+    return discord.Embed(
+        title="Game Night Bot Commands",
+        description="\n".join(lines),
+        color=discord.Color.blurple(),
+    )
+
+# /help command
+@bot.tree.command(name="help", description="Show all available commands and their usage")
+async def help_command(interaction: discord.Interaction):
+    await interaction.response.send_message(
+        embed=build_help_embed(),
+        ephemeral=True
+    )
+
 
 @bot.tree.command(name="wishlist", description="Add a Steam game to your wishlist")
 @app_commands.describe(game="Game name or Steam store link, e.g. Portal 2")
