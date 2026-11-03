@@ -1,4 +1,4 @@
-"""Steam-link price comparisons, independent of wishlists and Discord."""
+"""Game-name and Steam-link price comparisons, independent of wishlists and Discord."""
 
 import asyncio
 from dataclasses import dataclass
@@ -9,19 +9,26 @@ from urllib.parse import quote, unquote, urlsplit
 import aiohttp
 
 INVALID_LINK = "That is not a valid store link"
+EMPTY_INPUT = "Enter a game name or Steam store link"
+GAME_NOT_FOUND = "Game not found"
 NO_PRICES = "No prices found for this game"
 UNAVAILABLE = "Prices are temporarily unavailable, try again later"
 SERVER_ONLY = "Use this command in a server"
 LOOKUP_TIMEOUT = 10
 STEAM_URL = "https://store.steampowered.com/api/appdetails"
+SEARCH_URL = "https://store.steampowered.com/api/storesearch/"
 GAMES_URL = "https://www.cheapshark.com/api/1.0/games"
 USER_AGENT = "GameNightDealTracker/1.0 (https://github.com/AidanFeess/bowman-swe-repo)"
-# CheapShark store IDs. Input links are limited to Steam for Story 3.
+# CheapShark store IDs. Links must be from Steam; names are resolved on Steam.
 SUPPORTED_STORES = {"1": "Steam", "25": "Epic Games Store", "7": "GOG"}
 
 
 class PriceSourceError(Exception):
     """A price service failed, timed out, or returned an invalid response."""
+
+
+class GameNotFound(Exception):
+    """Steam's name search succeeded but returned no games."""
 
 
 @dataclass(frozen=True)
@@ -67,6 +74,12 @@ def parse_steam_link(text):
         return None
 
 
+def looks_like_link(text):
+    """Keep malformed or unsupported URLs out of the game-name search."""
+    return bool(re.match(r"(?:[a-z][a-z0-9+.-]*://|//|www\.)", text, re.IGNORECASE)
+                or "steampowered.com" in text.lower())
+
+
 def _money(value):
     if value is None or isinstance(value, bool):
         return None
@@ -105,11 +118,40 @@ async def _get_json(session, url, params):
         return await response.json()
 
 
-async def _lookup(app_id):
+async def _search_app_id(session, name):
+    """Prefer a case-insensitive exact title, otherwise Steam's first app result."""
+    payload = await _get_json(session, SEARCH_URL, {
+        "term": name, "cc": "us", "l": "english",
+    })
+    if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
+        raise PriceSourceError("Invalid Steam search response")
+    games = []
+    for item in payload["items"]:
+        if not isinstance(item, dict):
+            raise PriceSourceError("Invalid Steam search item")
+        if item.get("type", "app") != "app":
+            continue
+        app_id, title = item.get("id"), item.get("name")
+        if (not isinstance(app_id, int) or isinstance(app_id, bool)
+                or not 0 < app_id <= 4294967295
+                or not isinstance(title, str) or not title.strip()):
+            raise PriceSourceError("Invalid Steam search game")
+        games.append((app_id, title))
+    if not games:
+        raise GameNotFound()
+    for app_id, title in games:
+        if title.strip().casefold() == name.casefold():
+            return app_id
+    return games[0][0]
+
+
+async def _lookup(game):
     async with aiohttp.ClientSession(
         headers={"User-Agent": USER_AGENT},
         timeout=aiohttp.ClientTimeout(total=LOOKUP_TIMEOUT),
     ) as session:
+        # Search uses this same session and the outer lookup's remaining budget.
+        app_id = await _search_app_id(session, game) if isinstance(game, str) else game
         payload = await _get_json(session, STEAM_URL, {
             "appids": app_id, "filters": "basic,price_overview", "cc": "us", "l": "english",
         })
@@ -161,10 +203,13 @@ async def _lookup(app_id):
         return PriceResult(data["name"], tuple(offers[s] for s in SUPPORTED_STORES if s in offers))
 
 
-async def lookup_prices(app_id):
-    """One cancellable, 10-second budget for the entire lookup, not per store."""
+async def lookup_prices(game):
+    """Price an app ID or name within one 10-second search-and-price deadline.
+
+    Integer IDs remain supported for Steam links and the daily digest.
+    """
     try:
-        return await asyncio.wait_for(_lookup(app_id), timeout=LOOKUP_TIMEOUT)
+        return await asyncio.wait_for(_lookup(game), timeout=LOOKUP_TIMEOUT)
     except (asyncio.TimeoutError, aiohttp.ClientError, ValueError) as exc:
         raise PriceSourceError("Price lookup failed") from exc
 

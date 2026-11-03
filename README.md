@@ -6,17 +6,21 @@ A Discord bot that lets a server keep game wishlists, compare prices, and send e
 - `/wishlist game:<name or Steam link>` adds a game to your wishlist.
 - `/list` shows your own wishlist. Other users' games are not shown.
 - `/remove game:<name>` removes a game from your wishlist. Suggestions from your own wishlist appear as you type.
-- `/pullpricing link:<Steam store link>` compares available Steam, Epic Games Store,
+- `/pullpricing game:<name or Steam store link>` compares available Steam, Epic Games Store,
   and GOG prices in USD (US region). No wishlist entry is needed.
 - `/digest` sends you a private message with your own wishlist games that are on sale, with prices.
 - `/seasonal` shows how long until the next Steam seasonal sale.
 
-Example: `/pullpricing link:https://store.steampowered.com/app/292030/`
+Examples: `/pullpricing game:Portal 2` or
+`/pullpricing game:https://store.steampowered.com/app/292030/`
 
 The reply includes the game name and each available store's current price,
 original price, discount percentage, and purchase link. Free offers show `Free`.
-Story 3 accepts **Steam app links only**; Epic and GOG are comparison stores,
-not accepted input links. See [pricing documentation](docs/pullpricing.md) for
+Names prefer an exact Steam title match (ignoring capitalization), otherwise the
+top Steam app result. The reply shows the matched game's name. Search and pricing
+share one 10-second timeout. Empty input returns `Enter a game name or Steam store link`;
+a name with no search results returns `Game not found`. Epic and GOG are comparison
+stores, not accepted input links. See [pricing documentation](docs/pullpricing.md) for
 matching rules, error messages, and the manual test checklist.
 
 ## Daily digest
@@ -79,7 +83,7 @@ Run just the digest or seasonal tests with `python -m unittest -v test_digest` o
   - `bot.py` has the Discord commands.
   - `handler.py` has the wishlist logic.
   - `steam.py` looks up games on Steam.
-  - `pricing.py` matches Steam app IDs to cross-store prices and formats offers.
+  - `pricing.py` searches game names, matches Steam app IDs to cross-store prices, and formats offers.
   - `digest.py` builds and sends the daily digest and the `/digest` command.
   - `seasonal.py` has the Steam sale calendar and the `/seasonal` countdown.
   - `ratelimit.py` has the command rate limiter (`slow_down.png` is the picture it posts).
