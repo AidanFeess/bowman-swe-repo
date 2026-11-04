@@ -31,11 +31,69 @@ class PullPricingTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(bot.pullpricing.guild_only)
 
     async def test_invalid_input_returns_exact_message_without_lookup(self):
-        await bot.pullpricing.callback(self.interaction, "not a link")
-        self.interaction.response.send_message.assert_awaited_once_with(
-            "That is not a valid store link", ephemeral=True
+        for value in ("https://example.com/game", "store.steampowered.com/app/620/",
+                      "https://store.steampowered.com.evil.com/app/620/",
+                      "https://store.steampowered.com/sub/620/", "steam://run/620",
+                      "//store.steampowered.com/app/620/", "www.example.com/game"):
+            with self.subTest(value=value):
+                self.interaction.response.send_message.reset_mock()
+                await bot.pullpricing.callback(self.interaction, value)
+                self.interaction.response.send_message.assert_awaited_once_with(
+                    "That is not a valid store link", ephemeral=True
+                )
+                self.lookup.assert_not_awaited()
+                self.interaction.response.defer.assert_not_awaited()
+
+    async def test_empty_input_has_no_lookup(self):
+        for value in ("", "   ", "\t\n"):
+            with self.subTest(value=value):
+                self.interaction.response.send_message.reset_mock()
+                await bot.pullpricing.callback(self.interaction, value)
+                self.interaction.response.send_message.assert_awaited_once_with(
+                    "Enter a game name or Steam store link", ephemeral=True
+                )
+                self.lookup.assert_not_awaited()
+                self.interaction.response.defer.assert_not_awaited()
+
+    async def test_name_search_shows_the_matched_title(self):
+        self.lookup.return_value = pricing.PriceResult("Portal 2", (
+            pricing.Offer("Steam", Decimal("9.99"), Decimal("9.99"),
+                          "https://store.steampowered.com/app/620/"),
+        ))
+
+        async def lookup_after_defer(name):
+            self.interaction.response.defer.assert_awaited_once()
+            return self.lookup.return_value
+
+        self.lookup.side_effect = lookup_after_defer
+        await bot.pullpricing.callback(self.interaction, "  portal  ")
+        self.lookup.assert_awaited_once_with("portal")
+        embed = self.interaction.followup.send.call_args.kwargs["embed"]
+        self.assertEqual(embed.title, "Portal 2")
+        self.assertIn("Current price: **$9.99**", embed.fields[0].value)
+
+    async def test_name_without_results_returns_game_not_found(self):
+        self.lookup.side_effect = pricing.GameNotFound()
+        await bot.pullpricing.callback(self.interaction, "no such game")
+        self.interaction.followup.send.assert_awaited_once_with("Game not found")
+
+    async def test_name_search_failure_returns_unavailable(self):
+        self.lookup.side_effect = pricing.PriceSourceError()
+        await bot.pullpricing.callback(self.interaction, "Portal 2")
+        self.interaction.followup.send.assert_awaited_once_with(
+            "Prices are temporarily unavailable, try again later"
         )
-        self.lookup.assert_not_awaited()
+
+    async def test_dm_rejects_names_and_empty_input_before_search(self):
+        self.interaction.guild_id = None
+        for value in ("Portal 2", ""):
+            with self.subTest(value=value):
+                self.interaction.response.send_message.reset_mock()
+                await bot.pullpricing.callback(self.interaction, value)
+                self.interaction.response.send_message.assert_awaited_once_with(
+                    "Use this command in a server", ephemeral=True
+                )
+                self.lookup.assert_not_awaited()
 
     async def test_no_prices_returns_exact_message(self):
         self.lookup.return_value = pricing.PriceResult("Unknown game")
@@ -78,11 +136,14 @@ class PullPricingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Current price: **Free**", embed.fields[2].value)
         self.assertFalse(kwargs["allowed_mentions"].everyone)
 
-    async def test_command_is_registered_with_required_link(self):
+    async def test_command_and_help_use_required_game_input(self):
         command = bot.bot.tree.get_command("pullpricing")
         self.assertIs(command, bot.pullpricing)
-        self.assertEqual(command.parameters[0].name, "link")
+        self.assertEqual(command.parameters[0].name, "game")
         self.assertTrue(command.parameters[0].required)
+        self.assertIn("Game name or Steam store link", command.parameters[0].description)
+        self.assertIn("/pullpricing <game>", bot.build_help_embed().description)
+        self.assertNotIn("/pullpricing <link>", bot.build_help_embed().description)
 
 
 if __name__ == "__main__":

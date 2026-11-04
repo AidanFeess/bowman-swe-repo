@@ -5,26 +5,34 @@ from pathlib import Path
 #store wishlist data and apply acceptance criteria 
 DATABASE_PATH = Path(__file__).resolve().parent / "wishlist.db"
 
+
 def create_tables():
     connection = sqlite3.connect(DATABASE_PATH)
 
     try:
         connection.execute("""
             CREATE TABLE IF NOT EXISTS wishlist (
-                id INTEGER PRIMARY KEY,          
+                id INTEGER PRIMARY KEY,
+                discord_guild_id TEXT NOT NULL,
                 discord_user_id TEXT NOT NULL,
                 game TEXT NOT NULL,
                 store TEXT NOT NULL
                     CHECK (store IN ('steam', 'epic', 'gog')),
                 link TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE (discord_user_id, store, link)
+                UNIQUE (discord_guild_id, discord_user_id, store, link)
             )
+        """)
+
+        connection.execute("""
+            CREATE INDEX IF NOT EXISTS idx_wishlist_server_game
+            ON wishlist (discord_guild_id, store, link)
         """)
 
         connection.commit()
     finally:
         connection.close()
+
 
 
 if __name__ == "__main__":
