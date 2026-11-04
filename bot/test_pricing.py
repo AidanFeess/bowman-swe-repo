@@ -182,6 +182,126 @@ class PricingTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(time.monotonic() - start, 0.5)
 
 
+class NamePricingTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.search = {"items": [
+            {"type": "app", "id": 123, "name": "The Witcher 3 Soundtrack"},
+            {"type": "app", "id": APP_ID, "name": "The Witcher 3: Wild Hunt"},
+        ]}
+        self.fetch = AsyncMock(side_effect=[self.search, STEAM, GAMES, DEALS])
+        patcher = patch("pricing._get_json", self.fetch)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    async def test_exact_name_beats_top_result_and_prices_all_stores(self):
+        result = await pricing.lookup_prices("the witcher 3: WILD HUNT")
+        self.assertEqual(result.name, "The Witcher 3: Wild Hunt")
+        self.assertEqual([o.store for o in result.offers], ["Steam", "Epic Games Store", "GOG"])
+        self.assertEqual(result.offers[0].current, Decimal("39.99"))
+        self.assertEqual(result.offers[2].discount, 75)
+        self.assertEqual(self.fetch.call_args_list[0].args[1:], (
+            pricing.SEARCH_URL,
+            {"term": "the witcher 3: WILD HUNT", "cc": "us", "l": "english"},
+        ))
+        self.assertEqual(self.fetch.call_args_list[1].args[2]["appids"], APP_ID)
+        # Search and pricing share the same HTTP session as well as the deadline.
+        sessions = [c.args[0] for c in self.fetch.call_args_list]
+        self.assertTrue(all(s is sessions[0] for s in sessions))
+        self.assertTrue(sessions[0].closed)
+
+    async def test_non_exact_name_uses_top_app_and_displays_canonical_name(self):
+        self.search["items"] = [
+            {"type": "sub", "id": 999, "name": "witcher"},
+            {"type": "app", "id": APP_ID, "name": "The Witcher 3"},
+            {"type": "app", "id": 123, "name": "The Witcher 2"},
+        ]
+        result = await pricing.lookup_prices("witcher")
+        self.assertEqual(self.fetch.call_args_list[1].args[2]["appids"], APP_ID)
+        self.assertEqual(result.name, "The Witcher 3: Wild Hunt")
+
+    async def test_no_games_stops_before_price_lookup(self):
+        for items in ([], [{"type": "sub", "id": 999, "name": "Bundle"}]):
+            with self.subTest(items=items):
+                self.fetch.reset_mock()
+                self.fetch.side_effect = [{"items": items}]
+                with self.assertRaises(pricing.GameNotFound):
+                    await pricing.lookup_prices("no such game")
+                self.assertEqual(self.fetch.await_count, 1)
+
+    async def test_existing_integer_lookup_skips_search(self):
+        self.fetch.side_effect = [STEAM, GAMES, DEALS]
+        await pricing.lookup_prices(APP_ID)
+        self.assertEqual(self.fetch.call_args_list[0].args[1], pricing.STEAM_URL)
+
+    async def test_search_errors_become_source_errors(self):
+        for error in (aiohttp.ClientConnectionError(), ValueError("invalid JSON"),
+                      asyncio.TimeoutError(), aiohttp.ClientResponseError(
+                          request_info=MagicMock(), history=(), status=429)):
+            with self.subTest(error=type(error).__name__):
+                self.fetch.side_effect = error
+                with self.assertRaises(pricing.PriceSourceError):
+                    await pricing.lookup_prices("Portal 2")
+
+    async def test_malformed_search_is_not_reported_as_game_not_found(self):
+        for payload in (None, [], {}, {"items": None}, {"items": [None]},
+                        {"items": [{"id": True, "name": "Portal 2"}]},
+                        {"items": [{"id": 620, "name": ""}]},
+                        {"items": [{"id": -1, "name": "Portal 2"}]},
+                        {"items": [{"name": "Portal 2"}]}):
+            with self.subTest(payload=payload):
+                self.fetch.side_effect = [payload]
+                with self.assertRaises(pricing.PriceSourceError):
+                    await pricing.lookup_prices("Portal 2")
+
+    async def test_name_match_with_missing_prices_is_not_a_search_miss(self):
+        steam = copy.deepcopy(STEAM)
+        del steam[str(APP_ID)]["data"]["price_overview"]
+        self.fetch.side_effect = [self.search, steam, []]
+        result = await pricing.lookup_prices("The Witcher 3: Wild Hunt")
+        self.assertEqual(result.name, "The Witcher 3: Wild Hunt")
+        self.assertEqual(result.offers, ())
+
+    async def test_hung_search_is_cancelled_at_deadline(self):
+        cancelled = asyncio.Event()
+
+        async def hang(*args):
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        self.fetch.side_effect = hang
+        with patch("pricing.LOOKUP_TIMEOUT", 0.03):
+            with self.assertRaises(pricing.PriceSourceError):
+                await pricing.lookup_prices("Portal 2")
+        self.assertTrue(cancelled.is_set())
+        self.assertTrue(self.fetch.call_args.args[0].closed)
+
+    async def test_search_and_prices_share_one_total_deadline(self):
+        self.assertEqual(pricing.LOOKUP_TIMEOUT, 10)
+        search_finished = asyncio.Event()
+        prices_cancelled = asyncio.Event()
+
+        async def slow_sources(session, url, params):
+            try:
+                await asyncio.sleep(0.1)
+                if url == pricing.SEARCH_URL:
+                    search_finished.set()
+                    return self.search
+                return STEAM
+            except asyncio.CancelledError:
+                if url == pricing.STEAM_URL:
+                    prices_cancelled.set()
+                raise
+
+        self.fetch.side_effect = slow_sources
+        with patch("pricing.LOOKUP_TIMEOUT", 0.15):
+            with self.assertRaises(pricing.PriceSourceError):
+                await pricing.lookup_prices("The Witcher 3: Wild Hunt")
+        self.assertTrue(search_finished.is_set())
+        self.assertTrue(prices_cancelled.is_set())
+
+
 class HttpTests(unittest.IsolatedAsyncioTestCase):
     async def test_http_status_checked_before_json(self):
         response = MagicMock()
