@@ -267,20 +267,29 @@ async def list_wishlist(interaction: discord.Interaction, user: discord.Member |
 
 
 @bot.tree.command(name="pullpricing", description="Compare a game's prices across stores")
-@app_commands.describe(link="Steam store link, e.g. https://store.steampowered.com/app/620/")
-async def pullpricing(interaction: discord.Interaction, link: str):
+@app_commands.describe(game="Game name or Steam store link, e.g. Portal 2")
+async def pullpricing(interaction: discord.Interaction, game: str):
     # Keep this command available in DMs so it can return the required message.
     if interaction.guild_id is None:
         await interaction.response.send_message(pricing.SERVER_ONLY, ephemeral=True)
         return
-    app_id = pricing.parse_steam_link(link)
-    if app_id is None:
-        await interaction.response.send_message(pricing.INVALID_LINK, ephemeral=True)
+    game = game.strip()
+    if not game:
+        await interaction.response.send_message(pricing.EMPTY_INPUT, ephemeral=True)
         return
+    query = game
+    if pricing.looks_like_link(game):
+        query = pricing.parse_steam_link(game)
+        if query is None:
+            await interaction.response.send_message(pricing.INVALID_LINK, ephemeral=True)
+            return
 
     await interaction.response.defer()
     try:
-        result = await pricing.lookup_prices(app_id)
+        result = await pricing.lookup_prices(query)
+    except pricing.GameNotFound:
+        await interaction.followup.send(pricing.GAME_NOT_FOUND)
+        return
     except pricing.PriceSourceError:
         await interaction.followup.send(pricing.UNAVAILABLE)
         return
