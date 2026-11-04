@@ -24,14 +24,16 @@ def sale(app_id=620, name="Portal 2", current="4.99", original="9.99"):
     return pricing.PriceResult(name, (offer,))
 
 
-def add_wish(user_id, app_id=620, game="Portal 2"):
-    with closing(sqlite3.connect(db.DATABASE_PATH)) as conn:
-        with conn:
-            conn.execute(
-                "INSERT INTO wishlist (discord_user_id, game, store, link) VALUES (?, ?, 'steam', ?)",
-                (str(user_id), game, link_for(app_id)),
-            )
-
+def add_wish(conn, user_id, game, store, link, guild_id=123456789):
+    conn.execute(
+        """
+        INSERT INTO wishlist
+        (discord_guild_id, discord_user_id, game, store, link)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (str(guild_id), str(user_id), game, store, link)
+    )
+    conn.commit()
 
 class FakeServer:
     """A server whose members are known by id, each with a send() we can inspect."""
