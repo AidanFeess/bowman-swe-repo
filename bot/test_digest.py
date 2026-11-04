@@ -24,16 +24,14 @@ def sale(app_id=620, name="Portal 2", current="4.99", original="9.99"):
     return pricing.PriceResult(name, (offer,))
 
 
-def add_wish(conn, user_id, game, store, link, guild_id=123456789):
-    conn.execute(
-        """
-        INSERT INTO wishlist
-        (discord_guild_id, discord_user_id, game, store, link)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (str(guild_id), str(user_id), game, store, link)
-    )
-    conn.commit()
+def add_wish(user_id, app_id=620, game="Portal 2"):
+    with closing(sqlite3.connect(db.DATABASE_PATH)) as conn:
+        with conn:
+            conn.execute(
+                "INSERT INTO wishlist (discord_guild_id, discord_user_id, game, store, link) VALUES (?, ?, ?, 'steam', ?)",
+                ("1", str(user_id), game, link_for(app_id)),
+            )
+
 
 class FakeServer:
     """A server whose members are known by id, each with a send() we can inspect."""
@@ -78,7 +76,8 @@ class TestDigest(unittest.IsolatedAsyncioTestCase):
         report = AsyncMock()
         lookup = lookup or AsyncMock(return_value=sale())
         with patch.object(digest, "current_day", return_value=day), \
-             patch.object(pricing, "lookup_prices", lookup):
+             patch.object(pricing, "lookup_prices", lookup), \
+             patch.object(digest, "get_steam_sale_end", AsyncMock(return_value=None)):
             await self.service.generate_digest(server, report)
         return report
 
@@ -96,6 +95,40 @@ class TestDigest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(embeds[0].title, "Portal 2")
         self.assertIn("$4.99", embeds[0].fields[0].value)
         self.assertIn("Sent a private message to 1 user(s).", self.report_text(report))
+
+    async def test_other_servers_wishlists_are_not_used(self):
+        add_wish(10)
+        with closing(sqlite3.connect(db.DATABASE_PATH)) as conn:
+            with conn:
+                conn.execute(
+                    "INSERT INTO wishlist (discord_guild_id, discord_user_id, game, store, link) "
+                    "VALUES ('2', '11', 'Hades', 'steam', ?)",
+                    (link_for(1145360),),
+                )
+        server = FakeServer({10, 11})
+        lookup = AsyncMock(return_value=sale())
+        await self.run_digest(server, lookup)
+        lookup.assert_awaited_once_with(620)
+        server.members[10].send.assert_awaited_once()
+        server.members[11].send.assert_not_awaited()
+
+    async def test_sale_end_time_is_shown_on_the_steam_card(self):
+        add_wish(10)
+        server = FakeServer({10})
+        report = AsyncMock()
+        with patch.object(digest, "current_day", return_value="2026-10-29"), \
+             patch.object(pricing, "lookup_prices", AsyncMock(return_value=sale())), \
+             patch.object(digest, "get_steam_sale_end", AsyncMock(return_value=1788000000)):
+            await self.service.generate_digest(server, report)
+        embed = server.members[10].send.await_args.kwargs["embeds"][0]
+        self.assertIn("Sale ends: <t:1788000000:R>", embed.fields[0].value)
+
+    async def test_missing_sale_end_time_says_unavailable(self):
+        add_wish(10)
+        server = FakeServer({10})
+        await self.run_digest(server)
+        embed = server.members[10].send.await_args.kwargs["embeds"][0]
+        self.assertIn("Sale end time: unavailable", embed.fields[0].value)
 
     async def test_same_day_second_run_sends_nothing(self):
         add_wish(10)
@@ -219,7 +252,8 @@ class TestDigest(unittest.IsolatedAsyncioTestCase):
     async def run_manual(self, server, user_id, lookup=None, day="2026-10-29"):
         interaction = self.manual(server, user_id)
         with patch.object(digest, "current_day", return_value=day), \
-             patch.object(pricing, "lookup_prices", lookup or AsyncMock(return_value=sale())):
+             patch.object(pricing, "lookup_prices", lookup or AsyncMock(return_value=sale())), \
+             patch.object(digest, "get_steam_sale_end", AsyncMock(return_value=None)):
             await self.service.manual_digest(interaction)
         return interaction
 
@@ -292,7 +326,8 @@ class TestDigest(unittest.IsolatedAsyncioTestCase):
         interaction.response.defer = AsyncMock()
         interaction.followup.send = AsyncMock()
         with patch.object(digest, "current_day", return_value="2026-10-29"), \
-             patch.object(pricing, "lookup_prices", AsyncMock(return_value=sale())):
+             patch.object(pricing, "lookup_prices", AsyncMock(return_value=sale())), \
+             patch.object(digest, "get_steam_sale_end", AsyncMock(return_value=None)):
             await self.service.manual_digest(interaction)
         interaction.response.defer.assert_awaited_once_with(ephemeral=True)
         self.assertTrue(interaction.followup.send.await_args.kwargs["ephemeral"])
