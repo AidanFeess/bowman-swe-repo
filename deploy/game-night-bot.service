@@ -1,0 +1,30 @@
+[Unit]
+Description=Game Night Deal Tracker Discord bot
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=game-night-bot
+Group=game-night-bot
+WorkingDirectory=/opt/game-night-bot/repo/bot
+EnvironmentFile=/etc/game-night-bot.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/game-night-bot/venv/bin/python /opt/game-night-bot/repo/bot/bot.py
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+StateDirectory=game-night-bot
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/game-night-bot
+
+[Install]
+WantedBy=multi-user.target

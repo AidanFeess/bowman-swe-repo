@@ -68,6 +68,24 @@ To stop command spamming, the bot limits how fast one person can use commands. A
 
 To receive digest messages, turn on "Direct Messages" from server members in the server's privacy settings.
 
+## Server deployment
+
+The bot is deployed on `172.25.255.101` as `game-night-bot.service`. It starts on
+boot and restarts automatically after a crash. Connect with
+`ssh root@172.25.255.101`, then use:
+
+```sh
+systemctl start game-night-bot
+systemctl stop game-night-bot
+systemctl restart game-night-bot
+systemctl status game-night-bot --no-pager
+journalctl -u game-night-bot -f
+```
+
+Settings are in `/etc/game-night-bot.env` (root-only). Wishlist and notification
+data persist in `/var/lib/game-night-bot/wishlist.db`. See
+[deployment instructions](docs/deployment.md) for installation, updates, and backups.
+
 ## Tests
 In the `bot` folder, run:
 ```
