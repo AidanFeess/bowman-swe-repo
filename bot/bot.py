@@ -137,8 +137,8 @@ async def help_command(interaction: discord.Interaction):
     )
 
 
-@bot.tree.command(name="wishlist", description="Add a Steam game to your wishlist")
-@app_commands.describe(game="Game name or Steam store link, e.g. Portal 2")
+@bot.tree.command(name="wishlist", description="Add a game to your wishlist")
+@app_commands.describe(game="Game name or a Steam, Epic Games, or GOG store link, e.g. Portal 2")
 @app_commands.guild_only()
 async def wishlist(interaction: discord.Interaction, game: str):
     # Steam lookups can take longer than Discord's 3 second limit, so acknowledge first
