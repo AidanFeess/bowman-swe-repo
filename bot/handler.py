@@ -1,8 +1,9 @@
 import steam
+import stores
 import db
 
 BAD_LINK_MSG = (
-    "Type a game name or paste a Steam store link. "
+    "Type a game name or paste a Steam, Epic Games Store, or GOG link. "
     "Example: https://store.steampowered.com/app/620/Portal_2/"
 )
 
@@ -15,6 +16,15 @@ def add_to_wishlist(guild_id, user_id, text):
         return "bad_link", BAD_LINK_MSG
 
     try:
+        store_game = stores.parse_store_link(text)
+        if store_game is not None:
+            # The user pasted an Epic Games Store or GOG link. The name comes from the link itself.
+            store, name, link = store_game
+            label = stores.STORE_NAMES[store]
+            if not db.add_store_game(guild_id, user_id, store, link, name):
+                return "duplicate", f"**{name}** ({label}) is already on your wishlist."
+            return "added", f"Added **{name}** ({label}) to your wishlist."
+
         if text.lower().startswith(("http://", "https://")) or "steampowered.com" in text.lower():
             # The user pasted a link
             app_id = steam.get_app_id(text)

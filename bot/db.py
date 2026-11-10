@@ -8,20 +8,25 @@ def init_db():
     create_tables()
 
 
-def add_game(guild_id, user_id, app_id, name):
-    """Returns True if added, False if this user already has the game.
-    guild_id is accepted but not stored, because the wishlist table has no server column."""
-    link = f"https://store.steampowered.com/app/{app_id}/"   # one link per game, so duplicates are caught
+def add_store_game(guild_id, user_id, store, link, name):
+    """Returns True if added, False if this user already has this game from this store.
+    store is steam, epic or gog. The link is what tells two copies of a game apart."""
     try:
         with closing(sqlite3.connect(DATABASE_PATH)) as conn:
             with conn:
                 conn.execute(
-                    "INSERT INTO wishlist (discord_guild_id, discord_user_id, game, store, link) VALUES (?, ?, ?, 'steam', ?)",
-                    (str(guild_id), str(user_id), name, link),
+                    "INSERT INTO wishlist (discord_guild_id, discord_user_id, game, store, link) VALUES (?, ?, ?, ?, ?)",
+                    (str(guild_id), str(user_id), name, store, link),
                 )
         return True
     except sqlite3.IntegrityError:
         return False
+
+
+def add_game(guild_id, user_id, app_id, name):
+    """Adds a Steam game. Returns True if added, False if this user already has the game."""
+    link = f"https://store.steampowered.com/app/{app_id}/"   # one link per game, so duplicates are caught
+    return add_store_game(guild_id, user_id, "steam", link, name)
 
 
 # Individual User
