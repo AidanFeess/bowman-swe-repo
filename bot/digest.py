@@ -30,13 +30,23 @@ def get_saved_games(guild_id):
     with closing(sqlite3.connect(db.DATABASE_PATH)) as connection:
         return connection.execute(
             """
-            SELECT discord_user_id, link
+            SELECT discord_user_id, link, game, store
             FROM wishlist
             WHERE discord_guild_id = ?
             ORDER BY id
             """,
             (str(guild_id),),
         ).fetchall()
+
+
+def game_key(store, link):
+    """What identifies a wishlist game in the digest: the app ID for Steam games
+    (a number), or the store and link for Epic and GOG games (text). None if unsupported."""
+    if store == "steam":
+        return pricing.parse_steam_link(link)
+    if store in pricing.STORE_IDS:
+        return f"{store}:{link}"
+    return None
 
 
 def current_day(tz):
@@ -305,11 +315,11 @@ class Digest:
         # Count unique users who want each game across the server
         wishlist_counts = {}
 
-        for user_id, link in rows:
-            app_id = pricing.parse_steam_link(link)
+        for user_id, link, game, store in rows:
+            key = game_key(store, link)
 
-            if app_id is not None:
-                wishlist_counts.setdefault(app_id, set()).add(int(user_id))
+            if key is not None:
+                wishlist_counts.setdefault(key, set()).add(int(user_id))
 
 
         if personal:
@@ -323,7 +333,7 @@ class Digest:
         # Find which saved users still belong to this server.
         # fetch_member works without enabling the full members-list intent.
         members = {}
-        user_ids = {int(user_id) for user_id, _ in rows}
+        user_ids = {int(row[0]) for row in rows}
 
         for user_id in sorted(user_ids):
             member = guild.get_member(user_id)
@@ -337,24 +347,26 @@ class Digest:
             if not member.bot:
                 members[user_id] = member
 
-        # Group by Steam app ID.
+        # Group by Steam app ID, or by store and link for Epic and GOG games.
         # A set ensures each user is counted once per game.
         games = {}
+        game_details = {}  # key -> (store, name), needed to look up Epic and GOG prices
 
-        for user_id, link in rows:
+        for user_id, link, game, store in rows:
             user_id = int(user_id)
 
             if user_id not in members:
                 continue
 
-            app_id = pricing.parse_steam_link(link)
+            key = game_key(store, link)
 
-            if app_id is not None:
-                games.setdefault(app_id, set()).add(user_id)
+            if key is not None:
+                games.setdefault(key, set()).add(user_id)
+                game_details[key] = (store, game)
 
         if not games:
             await report(
-                "You don't have any Steam games on your wishlist. Use `/wishlist` to add one."
+                "You don't have any games on your wishlist. Use `/wishlist` to add one."
                 if personal
                 else "No supported wishlist games were found for members of this server."
             )
@@ -363,13 +375,17 @@ class Digest:
         sale_games = []
         unavailable = 0
 
-        # Reuse the same lookup function as /pullpricing.
+        # Reuse the same lookup functions as /pullpricing.
         for app_id, interested_users in games.items():
             try:
-                result = await pricing.lookup_prices(app_id)
+                if isinstance(app_id, int):  # a Steam game
+                    result = await pricing.lookup_prices(app_id)
+                else:  # an Epic or GOG game, looked up by its title
+                    store, name = game_details[app_id]
+                    result = await pricing.lookup_store_prices(name, store)
             except pricing.PriceSourceError:
                 unavailable += 1
-                logger.warning("Could not check prices for Steam app %s", app_id)
+                logger.warning("Could not check prices for %s", app_id)
                 continue
 
             if not result.offers:
