@@ -6,17 +6,19 @@ In a server, run:
 
 ```text
 /pullpricing game:Portal 2
+/pullpricing game:Hades store:gog
 /pullpricing game:https://store.steampowered.com/app/292030/The_Witcher_3/
 ```
 
 The command is independent of the wishlist. It accepts a game name or one HTTP or
 HTTPS Steam app URL, with an optional title, query string, and fragment. Leading
 and trailing whitespace is trimmed. Steam bundles, lookalike domains, and other
-stores' input links are rejected. Epic/GOG link parsing is not implemented.
+stores' input links are rejected by this command. The optional `store` selects
+where to search a name; it defaults to Steam. Epic/GOG names are supported.
 
 Sprint 2 renames the required option from `link` to `game`. Restart the bot to sync
 the new command schema before testing. `/help` builds its syntax from registered
-commands and will show `/pullpricing <game>` automatically.
+commands and will show `/pullpricing <game> [store]` automatically.
 
 Selected comparison stores are Steam, Epic Games Store, and GOG. Each available
 store gets one field showing current price, original price, discount (rounded to
@@ -28,10 +30,11 @@ free game shows original price `$0.00` and discount `0%`.
 ## Lookup and matching
 
 1. For a link, strictly parse the Steam hostname and app ID without requesting the
-   user's URL. For a name, call Steam's store search asynchronously. Prefer an
-   exact title match, ignoring capitalization; otherwise choose the first app
-   result in Steam's response order. Skip bundle/package results. A successful
-   search with no app results returns `Game not found` without a pricing lookup.
+   user's URL. For a name, search the selected store and rank exact normalized
+   titles first. Multiple results open an owner-only private selection menu;
+   only a single result proceeds automatically. An empty successful search
+   returns `Game not found`. See [game selection](sprint-3-game-tools.md) for
+   compact names, catalog fallback, and cancellation behavior.
 2. Ask Steam's public store endpoint for the name, free status, and US price.
 3. Search CheapShark using `steamAppID`, never a similar title. Follow a result
    only when there is exactly one distinct matching CheapShark game ID.
@@ -40,6 +43,9 @@ free game shows original price `$0.00` and discount `0%`.
    direct price; otherwise use a matched CheapShark offer. Keep the cheapest
    valid offer if a store has multiple entries for the matched game.
 
+For an Epic/GOG name choice, the selected CheapShark catalog ID is used directly
+to retrieve the supported-store offers, without repeating a title search.
+
 Missing, negative, nonnumeric, or inconsistent prices are omitted, never treated
 as zero. Unmatched or ambiguous CheapShark games contribute no comparison offers;
 Steam can still supply its own price. This avoids guessing between editions,
@@ -47,10 +53,10 @@ although catalog matching ultimately depends on the provider's data. A resolved
 game with no available prices (or an unknown app ID in a link) returns
 `No prices found for this game`. This differs from a name search with no results.
 Always check the displayed game title, especially for a partial or misspelled
-name: the top result can be a sequel or another game in the same series.
+name: choose the intended game and edition from the selection menu.
 
 Steam's public store-search endpoint is not a documented stable API. Its handling
-is isolated in `_search_app_id` in `pricing.py`; malformed responses and rate
+is isolated in `game_search.py` for interactive searches; malformed responses and rate
 limits return the unavailable message, rather than claiming a game was not found.
 
 CheapShark purchase links use its redirect endpoint as required by its
@@ -59,9 +65,10 @@ CheapShark purchase links use its redirect endpoint as required by its
 returns the offers for the matched game. No API keys are needed. The client sends
 a descriptive User-Agent because CheapShark rejects generic clients.
 
-The bot acknowledges a valid server request before doing network I/O. Name search
-and all price-source calls share one 10-second deadline and HTTP session, with cancellation and session
-cleanup. A timeout, connection failure, HTTP error (including rate limiting), bad
+The bot acknowledges a valid server request before doing network I/O. The search
+phase and the price lookup after selection each have a 10-second network deadline.
+Menus allow 120 seconds for a human choice. Requests are cancelled and sessions
+closed on timeout. A connection failure, HTTP error (including rate limiting), bad
 JSON, or invalid response structure returns the unavailable message even if an
 earlier source returned a price. There are no retries extending the deadline.
 
@@ -94,14 +101,14 @@ python -m unittest -v test_pricing test_pullpricing
 ```
 
 Tests use mock source responses and Discord interactions. Coverage includes all
-seven Sprint 2 acceptance criteria and the existing link-based behavior: exact
-name preference, top-result fallback, empty/no-result names, search failures,
+existing link-based behavior and Sprint 3 selection behavior: exact-name ranking,
+owner-only selection, empty/no-result names, search failures,
 exact ID matching, ambiguous editions, spoofed URLs,
 missing or corrupt prices, duplicate/unselected store offers, source errors,
 HTTP status handling, and cancellation under one total deadline. The deadline
 tests shorten the clock while checking the production constant is 10. They check
-both a stalled search and search-plus-pricing requests that individually fit the
-deadline but exceed it together. Pending I/O is cancelled and the session closes.
+both a stalled interactive search and lower-level search-plus-pricing calls that
+share one budget. Pending I/O is cancelled and the session closes.
 The command test checks that deferral occurs before lookup and that the actual
 registered callback sends the required embed or exact message. CI runs these
 tests without credentials or live API access.
@@ -114,8 +121,8 @@ normal pace to avoid the existing command rate limiter:
 
 | Check | Action | Expected |
 | --- | --- | --- |
-| Exact name | `/pullpricing game:Portal 2` (also try `portal 2`) | Portal 2's name, available stores, both prices, discounts, and purchase links |
-| Partial name | `/pullpricing game:Portal` | Steam's selected game name is clearly shown with its prices; search ranking can change |
+| Exact name | `/pullpricing game:Portal 2` (also try `portal 2`) | Exact title is first; choose it if a menu appears, then verify all price fields |
+| Partial name | `/pullpricing game:Portal` | A private menu when multiple games match; only the chosen game is priced |
 | No name results | `/pullpricing game:zzqvnotarealgame928374` | `Game not found` if Steam returns no games |
 | Empty input | Submit spaces in `game` if the client allows it | `Enter a game name or Steam store link`; Discord may reject empty required options before sending them |
 | Popular game / comparisons | Paste the Witcher 3 Steam link above | Game name, every available selected store, both prices, percent, clickable purchase link |

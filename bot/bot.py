@@ -12,6 +12,9 @@ import handler
 import pricing
 import ratelimit
 import seasonal
+import game_commands
+import stores
+import watches
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -84,6 +87,7 @@ class GameNightBot(discord.Client):
     def __init__(self):
         super().__init__(intents=discord.Intents.default())
         self.tree = GameNightTree(self)
+        self.watches = watches.WatchService(self)
 
     async def setup_hook(self):
         db.init_db()
@@ -94,6 +98,13 @@ class GameNightBot(discord.Client):
             await self.tree.sync(guild=guild)  # shows up instantly in the test server
         else:
             await self.tree.sync()
+        self.watches.start()
+
+    async def close(self):
+        self.watches.stop()
+        if hasattr(self, "digest"):
+            self.digest.daily_digest.cancel()
+        await super().close()
 
 
 bot = GameNightBot()
@@ -149,9 +160,25 @@ async def help_command(interaction: discord.Interaction):
 ])
 @app_commands.guild_only()
 async def wishlist(interaction: discord.Interaction, game: str, store: app_commands.Choice[str] | None = None):
-    # Store lookups can take longer than Discord's 3 second limit, so acknowledge first
-    await interaction.response.defer()
+    if interaction.guild_id is None:
+        await interaction.response.send_message(pricing.SERVER_ONLY, ephemeral=True)
+        return
+    game = game.strip()
+    if not game:
+        await interaction.response.send_message(pricing.EMPTY_INPUT, ephemeral=True)
+        return
     store_value = store.value if store else "steam"
+    if not pricing.looks_like_link(game):
+        await interaction.response.defer(ephemeral=True)
+        await game_commands.search_and_choose(
+            interaction, game, store_value,
+            lambda choice: game_commands.save_wishlist_choice(interaction, choice),
+        )
+        return
+    if pricing.parse_steam_link(game) is None and stores.parse_store_link(game) is None:
+        await interaction.response.send_message(handler.BAD_LINK_MSG, ephemeral=True)
+        return
+    await interaction.response.defer()
     status, message = await asyncio.to_thread(
         handler.add_to_wishlist, interaction.guild_id, interaction.user.id, game, store_value
     )
@@ -276,8 +303,13 @@ async def list_wishlist(interaction: discord.Interaction, user: discord.Member |
 
 
 @bot.tree.command(name="pullpricing", description="Compare a game's prices across stores")
-@app_commands.describe(game="Game name or Steam store link, e.g. Portal 2")
-async def pullpricing(interaction: discord.Interaction, game: str):
+@app_commands.describe(game="Game name or Steam store link, e.g. Portal 2", store="Where to search names (default: Steam)")
+@app_commands.choices(store=[
+    app_commands.Choice(name="Steam", value="steam"),
+    app_commands.Choice(name="Epic Games Store", value="epic"),
+    app_commands.Choice(name="GOG", value="gog"),
+])
+async def pullpricing(interaction: discord.Interaction, game: str, store: app_commands.Choice[str] | None = None):
     # Keep this command available in DMs so it can return the required message.
     if interaction.guild_id is None:
         await interaction.response.send_message(pricing.SERVER_ONLY, ephemeral=True)
@@ -285,6 +317,13 @@ async def pullpricing(interaction: discord.Interaction, game: str):
     game = game.strip()
     if not game:
         await interaction.response.send_message(pricing.EMPTY_INPUT, ephemeral=True)
+        return
+    if not pricing.looks_like_link(game):
+        await interaction.response.defer(ephemeral=True)
+        await game_commands.search_and_choose(
+            interaction, game, store.value if store else "steam",
+            lambda choice: game_commands.show_choice_prices(interaction, choice),
+        )
         return
     query = game
     if pricing.looks_like_link(game):
@@ -326,24 +365,43 @@ async def remove(interaction: discord.Interaction, game: str):
         await interaction.response.send_message("Use this command in a server.")
         return
 
-    # Database calls are synchronous, run them off the event loop
-    await interaction.response.defer()
-    try:
-        removed = await asyncio.to_thread(db.remove_game, interaction.guild_id, interaction.user.id, game)
-    except Exception as e:
-        print(f"remove error: {e}")
-        await interaction.followup.send("Sorry, I couldn't remove that game right now.")
-        return
+    await interaction.response.defer(ephemeral=True)
+    await game_commands.remove_game(interaction, game)
 
-    if removed is None:
-        await interaction.followup.send("That game is not on your wishlist.")
-        return
 
-    safe_name = discord.utils.escape_markdown(removed)
-    await interaction.followup.send(
-        f"Removed {safe_name} from your wishlist.",
-        allowed_mentions=discord.AllowedMentions.none(),
-    )
+@bot.tree.command(name="random", description="Pick a game from the server wishlist or a member's wishlist")
+@app_commands.describe(user="Choose a member, or leave empty for the server wishlist")
+async def random_command(interaction: discord.Interaction, user: discord.Member | None = None):
+    await game_commands.random_pick(interaction, user)
+
+
+@bot.tree.command(name="watch", description="DM me when a game reaches my target price")
+@app_commands.describe(game="Game name or store link", price="Target price in USD (0 means free)",
+                       store="Where to search names (default: Steam)")
+@app_commands.choices(store=[
+    app_commands.Choice(name="Steam", value="steam"),
+    app_commands.Choice(name="Epic Games Store", value="epic"),
+    app_commands.Choice(name="GOG", value="gog"),
+])
+async def watch(interaction: discord.Interaction, game: str, price: str, store: app_commands.Choice[str] | None = None):
+    await game_commands.add_watch(interaction, bot.watches, game, price, store.value if store else "steam")
+
+
+@bot.tree.command(name="watchlist", description="Show your target-price alerts in this server")
+async def watchlist(interaction: discord.Interaction):
+    await game_commands.watchlist(interaction)
+
+
+@bot.tree.command(name="unwatch", description="Remove one of your target-price alerts")
+@app_commands.describe(game="Name of a game on your watchlist")
+async def unwatch(interaction: discord.Interaction, game: str):
+    await game_commands.unwatch(interaction, bot.watches, game)
+
+
+@bot.tree.command(name="status", description="Show bot health and version (administrators only)")
+@app_commands.default_permissions(administrator=True)
+async def status(interaction: discord.Interaction):
+    await game_commands.admin_status(interaction, bot)
 
 @bot.tree.command(name="seasonal", description="See how long until the next Steam seasonal sale")
 async def seasonal_command(interaction: discord.Interaction):

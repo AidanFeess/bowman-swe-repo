@@ -1,11 +1,22 @@
 import unittest
 import uuid
+import tempfile
+from pathlib import Path
+from unittest.mock import patch
+import database
 import db
 
 
 class TestAddGame(unittest.TestCase):
 
     def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        path = Path(temporary.name) / "test.db"
+        for module in (db, database):
+            patcher = patch.object(module, "DATABASE_PATH", path)
+            patcher.start()
+            self.addCleanup(patcher.stop)
         db.init_db()
         self.user = uuid.uuid4().int % 10**12
         self.guild = 1

@@ -3,10 +3,12 @@
 import asyncio
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from functools import wraps
 import re
 from urllib.parse import quote, unquote, urlsplit
 
 import aiohttp
+import health
 
 INVALID_LINK = "That is not a valid store link"
 EMPTY_INPUT = "Enter a game name or Steam store link"
@@ -31,6 +33,19 @@ class PriceSourceError(Exception):
 
 class GameNotFound(Exception):
     """The Steam search worked, but no game matched the name."""
+
+
+def _tracked_lookup(function):
+    @wraps(function)
+    async def tracked(*args, **kwargs):
+        try:
+            result = await function(*args, **kwargs)
+        except PriceSourceError:
+            health.record_lookup(False)
+            raise
+        health.record_lookup(True)
+        return result
+    return tracked
 
 
 @dataclass(frozen=True)
@@ -126,9 +141,16 @@ def _steam_offer(data, app_id):
 
 
 async def _get_json(session, url, params):
-    async with session.get(url, params=params) as response:
-        response.raise_for_status()
-        return await response.json()
+    source = "Steam" if url.startswith("https://store.steampowered.com/") else "CheapShark"
+    try:
+        async with session.get(url, params=params) as response:
+            response.raise_for_status()
+            payload = await response.json()
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, asyncio.CancelledError):
+        health.record(source, False)
+        raise
+    health.record(source, True)
+    return payload
 
 
 async def _find_app_id(session, name):
@@ -259,6 +281,7 @@ async def _lookup_store(session, name, store):
     return PriceResult(best_title, (best,) if best else ())
 
 
+@_tracked_lookup
 async def lookup_store_prices(name, store):
     """Look up the price of a game on the Epic Games Store ("epic") or GOG ("gog") by its title.
 
@@ -278,6 +301,7 @@ async def lookup_store_prices(name, store):
         raise PriceSourceError("Price lookup failed") from exc
 
 
+@_tracked_lookup
 async def lookup_prices(query):
     """Look up prices by Steam app ID (a number) or by game name (text).
 
@@ -299,3 +323,36 @@ def format_offer(offer):
             f"Original price: ${offer.original:.2f}\n"
             f"Discount: {offer.discount}%\n"
             f"[Buy on {offer.store}]({offer.link})")
+
+
+async def _catalog_prices(session, game_id):
+    game = await _get_json(session, GAMES_URL, {"id": game_id})
+    if (not isinstance(game, dict) or not isinstance(game.get("info"), dict)
+            or not isinstance(game["info"].get("title"), str) or not game["info"]["title"].strip()
+            or not isinstance(game.get("deals"), list)):
+        raise PriceSourceError("Invalid catalog game response")
+    offers = {}
+    for deal in game["deals"]:
+        if not isinstance(deal, dict):
+            raise PriceSourceError("Invalid catalog offer")
+        store_id, deal_id = str(deal.get("storeID")), deal.get("dealID")
+        if store_id not in SUPPORTED_STORES or not isinstance(deal_id, str) or not 0 < len(deal_id) <= 256:
+            continue
+        link = "https://www.cheapshark.com/redirect?dealID=" + quote(unquote(deal_id), safe="")
+        offer = _offer(SUPPORTED_STORES[store_id], deal.get("price"), deal.get("retailPrice"), link)
+        if offer and (store_id not in offers or offer.current < offers[store_id].current):
+            offers[store_id] = offer
+    return PriceResult(game["info"]["title"], tuple(offers[s] for s in SUPPORTED_STORES if s in offers))
+
+
+@_tracked_lookup
+async def lookup_catalog_prices(game_id):
+    """Price the exact catalog ID selected by the user, without a second name search."""
+    if not str(game_id).isdigit():
+        raise ValueError("Invalid catalog ID")
+    try:
+        async with aiohttp.ClientSession(headers={"User-Agent": USER_AGENT},
+                                        timeout=aiohttp.ClientTimeout(total=LOOKUP_TIMEOUT)) as session:
+            return await asyncio.wait_for(_catalog_prices(session, str(game_id)), LOOKUP_TIMEOUT)
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+        raise PriceSourceError("Price lookup failed") from exc
