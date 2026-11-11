@@ -137,14 +137,23 @@ async def help_command(interaction: discord.Interaction):
     )
 
 
-@bot.tree.command(name="wishlist", description="Add a Steam game to your wishlist")
-@app_commands.describe(game="Game name or Steam store link, e.g. Portal 2")
+@bot.tree.command(name="wishlist", description="Add a game to your wishlist")
+@app_commands.describe(
+    game="Game name or a Steam, Epic Games, or GOG store link, e.g. Portal 2",
+    store="Where to search when you type a name (default: Steam)",
+)
+@app_commands.choices(store=[
+    app_commands.Choice(name="Steam", value="steam"),
+    app_commands.Choice(name="Epic Games Store", value="epic"),
+    app_commands.Choice(name="GOG", value="gog"),
+])
 @app_commands.guild_only()
-async def wishlist(interaction: discord.Interaction, game: str):
-    # Steam lookups can take longer than Discord's 3 second limit, so acknowledge first
+async def wishlist(interaction: discord.Interaction, game: str, store: app_commands.Choice[str] | None = None):
+    # Store lookups can take longer than Discord's 3 second limit, so acknowledge first
     await interaction.response.defer()
+    store_value = store.value if store else "steam"
     status, message = await asyncio.to_thread(
-        handler.add_to_wishlist, interaction.guild_id, interaction.user.id, game
+        handler.add_to_wishlist, interaction.guild_id, interaction.user.id, game, store_value
     )
     await interaction.followup.send(message)
 
