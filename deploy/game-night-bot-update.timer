@@ -1,0 +1,11 @@
+[Unit]
+Description=Check for Game Night bot updates every 15 minutes
+
+[Timer]
+OnCalendar=*:0/15
+Persistent=true
+AccuracySec=1min
+Unit=game-night-bot-update.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,16 @@
+[Unit]
+Description=Check GitHub main and update the Game Night bot
+Wants=network-online.target
+After=network-online.target game-night-bot.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/sbin/game-night-bot-update.py
+TimeoutStartSec=15min
+TimeoutStopSec=3min
+KillMode=mixed
+UMask=0077
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/opt/game-night-bot /var/lib/game-night-bot /var/backups/game-night-bot /run/lock

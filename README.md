@@ -71,7 +71,10 @@ To receive digest messages, turn on "Direct Messages" from server members in the
 ## Server deployment
 
 The bot is deployed on `172.25.255.101` as `game-night-bot.service`. It starts on
-boot and restarts automatically after a crash. Connect with
+boot and restarts automatically after a crash. `game-night-bot-update.timer`
+checks GitHub `main` every 15 minutes. New commits are built and tested separately
+before a restart; failed startup restores the previous code and database backup.
+An unchanged commit does not restart the bot. Connect with
 `ssh root@172.25.255.101`, then use:
 
 ```sh
@@ -80,6 +83,8 @@ systemctl stop game-night-bot
 systemctl restart game-night-bot
 systemctl status game-night-bot --no-pager
 journalctl -u game-night-bot -f
+systemctl start game-night-bot-update
+journalctl -u game-night-bot-update -n 40 --no-pager
 ```
 
 Settings are in `/etc/game-night-bot.env` (root-only). Wishlist and notification
