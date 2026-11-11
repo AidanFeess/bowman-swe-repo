@@ -21,6 +21,8 @@ GAMES_URL = "https://www.cheapshark.com/api/1.0/games"
 USER_AGENT = "GameNightDealTracker/1.0 (https://github.com/AidanFeess/bowman-swe-repo)"
 # CheapShark store IDs. Input links are limited to Steam; Epic and GOG are comparison stores.
 SUPPORTED_STORES = {"1": "Steam", "25": "Epic Games Store", "7": "GOG"}
+STORE_IDS = {"epic": "25", "gog": "7"}  # wishlist store name -> CheapShark store ID
+MAX_STORE_MATCHES = 3  # how many same-title games to check for a store price
 
 
 class PriceSourceError(Exception):
@@ -84,6 +86,11 @@ def parse_steam_link(text):
         return app_id if 0 < app_id <= 4294967295 else None
     except ValueError:
         return None
+
+
+def _plain_title(title):
+    """Lowercase letters and digits only, so "The Witcher 3: Wild Hunt" matches "the witcher 3 wild hunt"."""
+    return re.sub(r"[\W_]+", "", title.casefold())
 
 
 def _money(value):
@@ -211,6 +218,64 @@ async def _search_and_lookup(session, query):
             raise GameNotFound()
         app_id = await _find_app_id(session, query.strip())
     return await _lookup(session, app_id)
+
+
+async def _lookup_store(session, name, store):
+    """Find a game by its exact title on CheapShark and return its price on one store."""
+    store_id = STORE_IDS[store]
+    found = await _get_json(session, GAMES_URL, {"title": name, "limit": 20})
+    if not isinstance(found, list) or any(not isinstance(g, dict) for g in found):
+        raise PriceSourceError("Invalid CheapShark search response")
+
+    wanted = _plain_title(name)
+    game_ids = []
+    for game in found:
+        game_id, title = str(game.get("gameID", "")), game.get("external")
+        if not game_id.isdigit() or not isinstance(title, str):
+            raise PriceSourceError("Invalid CheapShark search result")
+        # Only the same title counts. A close match (Hades II for Hades) is a different game.
+        if wanted and _plain_title(title) == wanted:
+            game_ids.append(game_id)
+
+    best, best_title = None, name
+    for game_id in game_ids[:MAX_STORE_MATCHES]:
+        game = await _get_json(session, GAMES_URL, {"id": game_id})
+        if not isinstance(game, dict) or not isinstance(game.get("deals"), list):
+            raise PriceSourceError("Invalid CheapShark game response")
+        info = game.get("info")
+        for deal in game["deals"]:
+            if not isinstance(deal, dict):
+                raise PriceSourceError("Invalid CheapShark deal")
+            deal_id = deal.get("dealID")
+            if (str(deal.get("storeID")) != store_id or not isinstance(deal_id, str)
+                    or not deal_id or len(deal_id) > 256):
+                continue
+            link = "https://www.cheapshark.com/redirect?dealID=" + quote(unquote(deal_id), safe="")
+            offer = _offer(SUPPORTED_STORES[store_id], deal.get("price"), deal.get("retailPrice"), link)
+            if offer and (best is None or offer.current < best.current):
+                best = offer
+                if isinstance(info, dict) and isinstance(info.get("title"), str) and info["title"].strip():
+                    best_title = info["title"].strip()
+    return PriceResult(best_title, (best,) if best else ())
+
+
+async def lookup_store_prices(name, store):
+    """Look up the price of a game on the Epic Games Store ("epic") or GOG ("gog") by its title.
+
+    Returns a PriceResult with one offer, or none when that store has no price for a game
+    with exactly this title. Uses the same 10-second budget as lookup_prices."""
+    if store not in STORE_IDS:
+        raise ValueError(f"unsupported store: {store}")
+    if not isinstance(name, str) or not name.strip():
+        return PriceResult("")
+    try:
+        async with aiohttp.ClientSession(
+            headers={"User-Agent": USER_AGENT},
+            timeout=aiohttp.ClientTimeout(total=LOOKUP_TIMEOUT),
+        ) as session:
+            return await asyncio.wait_for(_lookup_store(session, name.strip(), store), timeout=LOOKUP_TIMEOUT)
+    except (asyncio.TimeoutError, aiohttp.ClientError, ValueError) as exc:
+        raise PriceSourceError("Price lookup failed") from exc
 
 
 async def lookup_prices(query):
