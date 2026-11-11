@@ -5,12 +5,14 @@ from unittest.mock import AsyncMock, patch
 
 import bot
 import pricing
+import game_search
 
 
 class PullPricingTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.interaction = SimpleNamespace(
             guild_id=1,
+            user=SimpleNamespace(id=2),
             response=SimpleNamespace(send_message=AsyncMock(), defer=AsyncMock()),
             followup=SimpleNamespace(send=AsyncMock()),
         )
@@ -19,6 +21,12 @@ class PullPricingTests(unittest.IsolatedAsyncioTestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         self.link = "https://store.steampowered.com/app/292030/"
+        self.search = AsyncMock(return_value=[game_search.GameChoice(
+            "Portal 2", "steam", "https://store.steampowered.com/app/620/", steam_id=620
+        )])
+        patcher = patch("game_search.search_games", self.search)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     async def test_dm_returns_exact_message_without_lookup(self):
         self.interaction.guild_id = None
@@ -67,21 +75,22 @@ class PullPricingTests(unittest.IsolatedAsyncioTestCase):
 
         self.lookup.side_effect = lookup_after_defer
         await bot.pullpricing.callback(self.interaction, "  portal  ")
-        self.lookup.assert_awaited_once_with("portal")
+        self.search.assert_awaited_once_with("portal", "steam")
+        self.lookup.assert_awaited_once_with(620)
         embed = self.interaction.followup.send.call_args.kwargs["embed"]
         self.assertEqual(embed.title, "Portal 2")
         self.assertIn("Current price: **$9.99**", embed.fields[0].value)
 
     async def test_name_without_results_returns_game_not_found(self):
-        self.lookup.side_effect = pricing.GameNotFound()
+        self.search.return_value = []
         await bot.pullpricing.callback(self.interaction, "no such game")
-        self.interaction.followup.send.assert_awaited_once_with("Game not found")
+        self.interaction.followup.send.assert_awaited_once_with("Game not found", ephemeral=True)
 
     async def test_name_search_failure_returns_unavailable(self):
-        self.lookup.side_effect = pricing.PriceSourceError()
+        self.search.side_effect = pricing.PriceSourceError()
         await bot.pullpricing.callback(self.interaction, "Portal 2")
         self.interaction.followup.send.assert_awaited_once_with(
-            "Prices are temporarily unavailable, try again later"
+            "Prices are temporarily unavailable, try again later", ephemeral=True
         )
 
     async def test_dm_rejects_names_and_empty_input_before_search(self):

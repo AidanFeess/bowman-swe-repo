@@ -10,18 +10,30 @@ A Discord bot that lets a server keep game wishlists, compare prices, and send e
   and GOG prices in USD (US region). No wishlist entry is needed.
 - `/digest` sends you a private message with your own wishlist games that are on sale, with prices.
 - `/seasonal` shows how long until the next Steam seasonal sale.
+- `/random [user:<member>]` picks a game from the server wishlist or a chosen member's wishlist and shows its current prices.
+- `/watch game:<name or store link> price:<USD target> [store:<store>]` sets a private target-price alert.
+- `/watchlist` shows your price alerts in this server; `/unwatch game:<name>` removes one.
+- `/status` privately shows bot health, uptime, version, and price-source status to server administrators.
 
 Examples: `/pullpricing game:Portal 2` or
 `/pullpricing game:https://store.steampowered.com/app/292030/`
 
 The reply includes the game name and each available store's current price,
 original price, discount percentage, and purchase link. Free offers show `Free`.
-Names prefer an exact Steam title match (ignoring capitalization), otherwise the
-top Steam app result. The reply shows the matched game's name. Search and pricing
-share one 10-second timeout. Empty input returns `Enter a game name or Steam store link`;
-a name with no search results returns `Game not found`. Epic and GOG are comparison
-stores, not accepted input links. See [pricing documentation](docs/pullpricing.md) for
+Game-name searches show a private selection menu when there is more than one match.
+Exact titles appear first; a compact name such as `darksouls` can match `Dark Souls`.
+The bot acts only on the selected game. Each search and selected-price lookup has
+a 10-second network timeout; selection menus expire after two minutes.
+Empty input returns `Enter a game name or Steam store link`;
+a name with no search results returns `Game not found`. For `/pullpricing`, Epic
+and GOG are search/comparison stores; direct input links must still be Steam links.
+See [pricing documentation](docs/pullpricing.md) for
 matching rules, error messages, and the manual test checklist.
+
+Price watches check **daily at 4 PM Central time** and send DMs when a game reaches
+the target or falls below the last notified price. They compare available Steam,
+Epic, and GOG offers in USD. Targets and notification state survive restarts.
+See [Sprint 3 game tools](docs/sprint-3-game-tools.md) for details and local tests.
 
 ## Daily digest
 The bot sends each member a private message (DM) with their own wishlist games that are on sale. Nobody sees anyone else's games, and nothing is posted in a channel.
@@ -84,6 +96,9 @@ Run just the digest or seasonal tests with `python -m unittest -v test_digest` o
   - `handler.py` has the wishlist logic.
   - `steam.py` looks up games on Steam.
   - `pricing.py` searches game names, matches Steam app IDs to cross-store prices, and formats offers.
+  - `game_search.py`, `game_picker.py`, and `game_commands.py` handle game choices and the new commands.
+  - `watch_db.py` and `watches.py` store price targets and run daily checks.
+  - `health.py` keeps the runtime health summary for `/status`.
   - `digest.py` builds and sends the daily digest and the `/digest` command.
   - `seasonal.py` has the Steam sale calendar and the `/seasonal` countdown.
   - `ratelimit.py` has the command rate limiter (`slow_down.png` is the picture it posts).

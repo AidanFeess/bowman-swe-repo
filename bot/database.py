@@ -29,6 +29,25 @@ def create_tables():
             ON wishlist (discord_guild_id, store, link)
         """)
 
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS price_watches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                discord_guild_id TEXT NOT NULL,
+                discord_user_id TEXT NOT NULL,
+                game_key TEXT NOT NULL,
+                game TEXT NOT NULL,
+                store TEXT NOT NULL CHECK (store IN ('steam', 'epic', 'gog')),
+                link TEXT NOT NULL,
+                steam_id INTEGER,
+                catalog_id TEXT,
+                target_cents INTEGER NOT NULL CHECK (target_cents >= 0),
+                notified_cents INTEGER,
+                last_checked_day TEXT,
+                revision INTEGER NOT NULL DEFAULT 1,
+                UNIQUE (discord_guild_id, discord_user_id, game_key)
+            )
+        """)
+
         connection.commit()
     finally:
         connection.close()

@@ -12,6 +12,7 @@ import database
 import db
 import handler
 import stores
+from game_search import GameChoice
 
 
 class ParseEpicLinkTests(unittest.TestCase):
@@ -399,20 +400,23 @@ class WishlistCommandTests(unittest.IsolatedAsyncioTestCase):
             followup=SimpleNamespace(send=AsyncMock()),
         )
 
-    async def test_store_choice_is_passed_to_the_handler(self):
+    async def test_store_choice_is_passed_to_search_and_selected_game_is_saved(self):
         interaction = self.interaction()
-        with patch("bot.handler.add_to_wishlist", return_value=("added", "Added it")) as add:
+        choice = GameChoice("Borderlands 3", "epic", "https://store.epicgames.com/en-US/p/borderlands-3", catalog_id="123")
+        with patch("game_search.search_games", AsyncMock(return_value=[choice])) as search, \
+                patch("db.add_store_game", return_value=True) as add:
             await bot.wishlist.callback(
                 interaction, "Borderlands 3", app_commands.Choice(name="Epic Games Store", value="epic")
             )
-        add.assert_called_once_with(1, 2, "Borderlands 3", "epic")
-        interaction.followup.send.assert_awaited_once_with("Added it")
+        search.assert_awaited_once_with("Borderlands 3", "epic")
+        add.assert_called_once_with(1, 2, "epic", choice.link, "Borderlands 3")
+        self.assertIn("Added **Borderlands 3**", interaction.followup.send.call_args.args[0])
 
     async def test_no_store_choice_means_steam(self):
         interaction = self.interaction()
-        with patch("bot.handler.add_to_wishlist", return_value=("added", "Added it")) as add:
+        with patch("game_search.search_games", AsyncMock(return_value=[])) as search:
             await bot.wishlist.callback(interaction, "Portal 2", None)
-        add.assert_called_once_with(1, 2, "Portal 2", "steam")
+        search.assert_awaited_once_with("Portal 2", "steam")
 
     def test_store_is_an_optional_choice_of_the_three_stores(self):
         store = next(p for p in bot.wishlist.parameters if p.name == "store")
