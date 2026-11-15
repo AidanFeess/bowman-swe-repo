@@ -1,4 +1,4 @@
-"""Steam seasonal sale calendar and the /seasonal countdown."""
+"""Steam, Epic Games Store and GOG seasonal sale calendar and the /seasonal countdown."""
 
 import datetime
 from dataclasses import dataclass
@@ -11,10 +11,24 @@ import discord
 STEAM_TIMEZONE = ZoneInfo("America/Los_Angeles")
 SALE_HOUR = 10
 
+# The time of day each store's sales start and end: (time zone, hour).
+# Epic changes its sales at 11 AM Eastern. GOG's start time here is an estimate (2 PM UTC).
+STORE_SCHEDULES = {
+    "Steam": (STEAM_TIMEZONE, SALE_HOUR),
+    "Epic Games Store": (ZoneInfo("America/New_York"), 11),
+    "GOG": (ZoneInfo("UTC"), 14),
+}
+START_TIMES = {
+    "Steam": "10 AM Pacific",
+    "Epic Games Store": "11 AM Eastern",
+    "GOG": "2 PM UTC",
+}
+
 NO_UPCOMING = (
     "No upcoming sale is on my calendar yet. "
     "Check store.steampowered.com for the latest schedule."
 )
+NO_UPCOMING_STORE = "No upcoming sale is on my calendar yet."
 
 
 @dataclass(frozen=True)
@@ -22,14 +36,19 @@ class Sale:
     name: str
     start: datetime.datetime
     end: datetime.datetime
+    store: str = "Steam"
+    estimated: bool = False  # True until the store announces the dates
 
 
-def make_sale(name, start, end):
-    """start and end are (year, month, day) in Steam's time zone."""
+def make_sale(name, start, end, store="Steam", estimated=False):
+    """start and end are (year, month, day) in the store's time zone."""
+    zone, hour = STORE_SCHEDULES[store]
     return Sale(
         name,
-        datetime.datetime(*start, SALE_HOUR, tzinfo=STEAM_TIMEZONE),
-        datetime.datetime(*end, SALE_HOUR, tzinfo=STEAM_TIMEZONE),
+        datetime.datetime(*start, hour, tzinfo=zone),
+        datetime.datetime(*end, hour, tzinfo=zone),
+        store,
+        estimated,
     )
 
 
@@ -44,6 +63,22 @@ SALES = (
     make_sale("Spring Sale 2027", (2027, 3, 18), (2027, 3, 25)),
     make_sale("Summer Sale 2027", (2027, 6, 24), (2027, 7, 8)),
 )
+
+# Epic Games Store sales. Epic has not announced these yet, so they are estimates
+# based on past years (whenisthenextsale.com). Mark a sale estimated=False once Epic announces it,
+# and add the next ones (Spring and MEGA Sale 2027) when the dates are known.
+EPIC_SALES = (
+    make_sale("Black Friday Sale 2026", (2026, 11, 19), (2026, 12, 1), "Epic Games Store", estimated=True),
+    make_sale("Holiday Sale 2026", (2026, 12, 17), (2027, 1, 7), "Epic Games Store", estimated=True),
+)
+
+# GOG sales. GOG has not announced these yet either, so they are estimates too.
+GOG_SALES = (
+    make_sale("Black Friday Sale 2026", (2026, 11, 25), (2026, 12, 3), "GOG", estimated=True),
+    make_sale("Winter Sale 2026", (2026, 12, 14), (2027, 1, 2), "GOG", estimated=True),
+)
+
+ALL_SALES = SALES + EPIC_SALES + GOG_SALES
 
 
 @dataclass(frozen=True)
@@ -82,9 +117,28 @@ def stamp(moment):
     return f"<t:{int(moment.timestamp())}:F>"
 
 
-def build_embed(now=None, sales=SALES):
-    now = now or datetime.datetime.now(datetime.timezone.utc)
+def store_summary(now, sales):
+    """The sale that is on now, and the next one, for one store."""
     status = get_status(now, sales)
+    lines = []
+    if status.running:
+        sale = status.running
+        lines.append(f"**{sale.name}** is on now! Ends in {time_left(sale.end - now)} ({stamp(sale.end)})")
+        if sale.estimated:
+            lines[-1] += " *(estimated)*"
+    if status.upcoming:
+        sale = status.upcoming[0]
+        label = "Next: " if status.running else ""
+        lines.append(f"{label}**{sale.name}**: starts in {time_left(sale.start - now)} ({stamp(sale.start)})")
+        if sale.estimated:
+            lines[-1] += " *(estimated)*"
+    return "\n".join(lines) or NO_UPCOMING_STORE
+
+
+def build_embed(now=None, sales=ALL_SALES):
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    steam_sales = tuple(sale for sale in sales if sale.store == "Steam")
+    status = get_status(now, steam_sales)
     embed = discord.Embed(color=discord.Color.blurple())
 
     if status.running:
@@ -115,5 +169,18 @@ def build_embed(now=None, sales=SALES):
             inline=False,
         )
 
-    embed.set_footer(text="Sales start at 10 AM Pacific Time • Dates can change")
+    # The next sale for each other store
+    shown = ["Steam"]
+    for store in STORE_SCHEDULES:
+        store_sales = tuple(sale for sale in sales if sale.store == store)
+        if store == "Steam" or not store_sales:
+            continue
+        shown.append(store)
+        embed.add_field(name=store, value=store_summary(now, store_sales), inline=False)
+
+    if len(shown) == 1:
+        embed.set_footer(text="Sales start at 10 AM Pacific Time • Dates can change")
+    else:
+        starts = ", ".join(f"{START_TIMES[store]} ({store})" for store in shown)
+        embed.set_footer(text=f"Sales start at {starts} • Dates can change")
     return embed
