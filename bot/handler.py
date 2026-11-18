@@ -50,17 +50,39 @@ def add_to_wishlist(guild_id, user_id, text, store="steam"):
                 return "not_found", f"I couldn't find a game called \"{text}\" on Steam."
             app_id, name = match
 
+        
         if not db.add_game(guild_id, user_id, app_id, name):
             return "duplicate", f"**{name}** is already on your wishlist."
 
+        _populate_genres(
+            "steam",
+            name,
+            f"https://store.steampowered.com/app/{app_id}/"
+        )
+
         return "added", f"Added **{name}** to your wishlist."
+
     except Exception as e:
         print(f"wishlist error: {e}")
         return "error", "Something went wrong looking that up. Try again in a moment."
 
 
+
 def _save_store_game(guild_id, user_id, store, name, link):
     label = stores.STORE_NAMES[store]
+
     if not db.add_store_game(guild_id, user_id, store, link, name):
         return "duplicate", f"**{name}** ({label}) is already on your wishlist."
+
+    _populate_genres(store, name, link)
+
     return "added", f"Added **{name}** ({label}) to your wishlist."
+
+
+def _populate_genres(store, name, link):
+    """Don't fail a wishlist addition if genre metadata fails."""
+    try:
+        db.populate_game_genres(store, name, link)
+    except Exception as exc:
+        print(f"genre metadata lookup failed: {exc}")
+

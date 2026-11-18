@@ -90,6 +90,14 @@ class RandomTests(unittest.IsolatedAsyncioTestCase):
 
 
 class SelectionCommandTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        mock = patch(
+            "game_commands.db.populate_game_genres",
+            return_value=[]
+        )
+        mock.start()
+        self.addCleanup(mock.stop)
+        
     async def test_wishlist_waits_for_selected_game_and_saves_that_game_only(self):
         i = interaction()
         with patch("game_search.search_games", AsyncMock(return_value=[GAME, OTHER])), \

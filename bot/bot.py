@@ -15,6 +15,7 @@ import seasonal
 import game_commands
 import stores
 import watches
+import genres
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -211,12 +212,12 @@ async def list_wishlist(interaction: discord.Interaction, user: discord.Member |
     try:
         if user is None:
             games = await asyncio.to_thread(
-                db.get_server_wishlist, interaction.guild_id
+                db.get_server_wishlist_with_genres, interaction.guild_id
             )
             title = "Server Wishlist"
         else:
             games = await asyncio.to_thread(
-                db.get_wishlist, interaction.guild_id, user.id
+                db.get_wishlist_with_genres, interaction.guild_id, user.id
             )
             title = f"{user.display_name}'s Wishlist"
 
@@ -241,49 +242,22 @@ async def list_wishlist(interaction: discord.Interaction, user: discord.Member |
         await interaction.followup.send(embed=embed)
         return
 
-    lines = []
+    
+    total_wishes = (
+        sum(row[3] for row in games)
+        if user is None else None
+    )
 
-    if user is None:
-        for number, (game, store, link, count) in enumerate(games, 1):
-            safe_name = discord.utils.escape_markdown(game)
-            lines.append(
-                f"**{number}. {safe_name}** — "
-                f"[View on {store.upper()}]({link}) "
-                f"— **{count} user(s)**"
-            )
+    footer = (
+        f"{len(games)} unique games • {total_wishes} wishlist entries"
+        if user is None
+        else f"{len(games)} games"
+    )
 
-        total_wishes = sum(row[3] for row in games)
-        footer = (
-            f"{len(games)} unique game(s) • "
-            f"{total_wishes} total wishlist entries"
-        )
-
-    else:
-        for number, (game, store, link) in enumerate(games, 1):
-            safe_name = discord.utils.escape_markdown(game)
-            lines.append(
-                f"**{number}. {safe_name}** — "
-                f"[View on {store.upper()}]({link})"
-            )
-
-        footer = f"{len(games)} game(s)"
-
-    # Split long lists into multiple embeds
-    pages = []
-    current_lines = []
-    current_length = 0
-
-    for line in lines:
-        if current_lines and current_length + len(line) + 1 > 3500:
-            pages.append("\n".join(current_lines))
-            current_lines = []
-            current_length = 0
-
-        current_lines.append(line)
-        current_length += len(line) + 1
-
-    if current_lines:
-        pages.append("\n".join(current_lines))
+    pages = genre_wishlist_pages(
+        games,
+        server=user is None
+    )
 
     for page_number, description in enumerate(pages, 1):
         embed = discord.Embed(
@@ -300,6 +274,47 @@ async def list_wishlist(interaction: discord.Interaction, user: discord.Member |
             embed=embed,
             allowed_mentions=discord.AllowedMentions.none()
         )
+
+
+def genre_wishlist_pages(games, server):
+    """Build genre-grouped pages within Discord's embed limits."""
+    pages = []
+    page = ""
+
+    for genre, rows in genres.group_rows(games):
+        heading = f"**{discord.utils.escape_markdown(genre)}**\n"
+
+        for number, row in enumerate(rows, 1):
+            name, store, link = row[:3]
+            safe_name = discord.utils.escape_markdown(name)[:180]
+            label = stores.STORE_NAMES.get(store, store.upper())
+
+            line = (
+                f"{number}. **{safe_name}** — "
+                f"[View on {label}]({link})"
+            )
+
+            if server:
+                line += f" — **{row[3]} user(s)**"
+
+            line += "\n"
+
+            if page and len(page) + len(heading) + len(line) > 3500:
+                pages.append(page.rstrip())
+                page = ""
+
+            # Repeat headings when a genre spans multiple pages.
+            if number == 1 or not page:
+                page += ("\n" if page else "") + heading
+
+            page += line
+
+        page += "\n"
+
+    if page.strip():
+        pages.append(page.rstrip())
+
+    return pages
 
 
 @bot.tree.command(name="pullpricing", description="Compare a game's prices across stores")

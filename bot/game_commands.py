@@ -35,6 +35,18 @@ async def save_wishlist_choice(interaction, choice):
     except sqlite3.Error:
         await interaction.followup.send("Sorry, I couldn't update your wishlist right now.", ephemeral=True)
         return
+    
+    if added:
+        try:
+            await asyncio.to_thread(
+                db.populate_game_genres,
+                choice.store,
+                choice.name,
+                choice.link
+            )
+        except Exception as exc:
+            print(f"genre metadata lookup failed: {exc}")
+
     name = discord.utils.escape_markdown(choice.name)[:300]
     label = stores.STORE_NAMES[choice.store]
     text = f"Added **{name}** ({label}) to your wishlist." if added else f"**{name}** ({label}) is already on your wishlist."
