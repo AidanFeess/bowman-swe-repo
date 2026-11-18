@@ -48,6 +48,18 @@ def create_tables():
             )
         """)
 
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS digest_settings (
+                discord_guild_id TEXT NOT NULL,
+                discord_user_id TEXT NOT NULL,
+                frequency TEXT NOT NULL DEFAULT 'daily'
+                    CHECK (frequency IN ('daily', 'weekly', 'off')),
+                delivery_time TEXT,
+                last_scheduled_day TEXT,
+                PRIMARY KEY (discord_guild_id, discord_user_id)
+            )
+        """)
+
         connection.commit()
     finally:
         connection.close()
