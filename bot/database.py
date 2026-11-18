@@ -29,6 +29,17 @@ def create_tables():
             ON wishlist (discord_guild_id, store, link)
         """)
 
+
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS game_genres (
+                store TEXT NOT NULL,
+                link TEXT NOT NULL,
+                genres TEXT NOT NULL DEFAULT '[]',
+                PRIMARY KEY (store, link)
+            )
+        """)
+
+
         connection.execute("""
             CREATE TABLE IF NOT EXISTS price_watches (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
