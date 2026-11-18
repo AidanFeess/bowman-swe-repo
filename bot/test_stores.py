@@ -132,6 +132,7 @@ class WishlistWithStoreLinksTests(unittest.TestCase):
         self.patches = [
             patch.object(database, "DATABASE_PATH", path),
             patch.object(db, "DATABASE_PATH", path),
+            patch("handler.db.populate_game_genres", return_value=[]),
         ]
         for p in self.patches:
             p.start()
@@ -317,6 +318,7 @@ class WishlistByNameTests(unittest.TestCase):
         self.patches = [
             patch.object(database, "DATABASE_PATH", path),
             patch.object(db, "DATABASE_PATH", path),
+            patch("handler.db.populate_game_genres", return_value=[]),
         ]
         for p in self.patches:
             p.start()
@@ -391,6 +393,13 @@ class WishlistByNameTests(unittest.TestCase):
 
 
 class WishlistCommandTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        mock = patch(
+            "game_commands.db.populate_game_genres",
+            return_value=[]
+        )
+        mock.start()
+        self.addCleanup(mock.stop)
 
     def interaction(self):
         return SimpleNamespace(

@@ -5,6 +5,13 @@ import handler
 
 
 class WishlistTests(unittest.TestCase):
+    def setUp(self):
+        mock = patch(
+            "handler.db.populate_game_genres",
+            return_value=[]
+        )
+        mock.start()
+        self.addCleanup(mock.stop)
 
     @patch("handler.db.add_game", return_value=True)
     @patch("handler.steam.get_game_name", return_value="Portal 2")

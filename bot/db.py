@@ -1,4 +1,6 @@
 import sqlite3
+import json
+import genres
 from contextlib import closing
 
 from database import DATABASE_PATH, create_tables
@@ -136,3 +138,120 @@ def remove_game(guild_id, user_id, name):
                 (str(guild_id), str(user_id), name),
             )
     return rows[0][0]
+
+
+def save_game_genres(store, link, labels):
+    """Save genre metadata for one store listing."""
+    labels = genres.clean_genres(labels)
+
+    if not labels:
+        return
+
+    with closing(sqlite3.connect(DATABASE_PATH)) as conn:
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO game_genres (store, link, genres)
+                VALUES (?, ?, ?)
+                ON CONFLICT(store, link)
+                DO UPDATE SET genres = excluded.genres
+                """,
+                (store, link, json.dumps(labels))
+            )
+
+
+def populate_game_genres(store, name, link):
+    """Fetch genres only when no useful genres are saved."""
+    with closing(sqlite3.connect(DATABASE_PATH)) as conn:
+        row = conn.execute(
+            """
+            SELECT genres
+            FROM game_genres
+            WHERE store=? AND link=?
+            """,
+            (store, link)
+        ).fetchone()
+
+    if row:
+        try:
+            existing = genres.clean_genres(json.loads(row[0]))
+            if existing:
+                return existing
+        except (TypeError, ValueError):
+            pass
+
+    labels = genres.lookup(store, name, link)
+
+    if labels:
+        save_game_genres(store, link, labels)
+
+    return labels
+
+
+def get_wishlist_with_genres(guild_id, user_id):
+    """Return a user's games with genre metadata."""
+    with closing(sqlite3.connect(DATABASE_PATH)) as conn:
+        return conn.execute(
+            """
+            SELECT
+                w.game,
+                w.store,
+                w.link,
+                COALESCE(g.genres, '[]')
+            FROM wishlist AS w
+            LEFT JOIN game_genres AS g
+              ON g.store = w.store
+              AND g.link = w.link
+            WHERE w.discord_guild_id = ?
+              AND w.discord_user_id = ?
+            ORDER BY w.game COLLATE NOCASE, w.store, w.link
+            """,
+            (str(guild_id), str(user_id))
+        ).fetchall()
+
+
+def get_server_wishlist_with_genres(guild_id):
+    """Return server games, user counts, and genres."""
+    with closing(sqlite3.connect(DATABASE_PATH)) as conn:
+        return conn.execute(
+            """
+            SELECT
+                MIN(w.game),
+                w.store,
+                w.link,
+                COUNT(DISTINCT w.discord_user_id),
+                COALESCE(g.genres, '[]')
+            FROM wishlist AS w
+            LEFT JOIN game_genres AS g
+              ON g.store = w.store
+              AND g.link = w.link
+            WHERE w.discord_guild_id = ?
+            GROUP BY w.store, w.link
+            ORDER BY MIN(w.game) COLLATE NOCASE,
+                     w.store, w.link
+            """,
+            (str(guild_id),)
+        ).fetchall()
+
+# THERE ARE CURRENTLY GAMES IN WIHSLIST WITH NO GENRE< THIS FIX
+def games_missing_genres():
+    """Find unique games that still need genre metadata."""
+    with closing(sqlite3.connect(DATABASE_PATH)) as conn:
+        return conn.execute(
+            """
+            SELECT
+                w.store,
+                w.link,
+                MIN(w.game)
+            FROM wishlist AS w
+            LEFT JOIN game_genres AS g
+              ON g.store = w.store
+              AND g.link = w.link
+            WHERE g.genres IS NULL
+               OR g.genres = '[]'
+            GROUP BY w.store, w.link
+            ORDER BY MIN(w.game) COLLATE NOCASE
+            """
+        ).fetchall()
+
+
