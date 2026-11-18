@@ -84,6 +84,108 @@ class TestDigest(unittest.IsolatedAsyncioTestCase):
     def report_text(self, report):
         return report.await_args_list[-1].args[0]
 
+    async def run_scheduled(self, server, year, month, day, hour, minute=0):
+        now = datetime.datetime(year, month, day, hour, minute, tzinfo=self.service.tz)
+        self.service.guild_id = server.id
+        self.service.bot.get_guild.return_value = server
+        with patch.object(digest.datetime, "datetime", wraps=datetime.datetime) as clock, \
+             patch.object(pricing, "lookup_prices", AsyncMock(return_value=sale())) as lookup, \
+             patch.object(digest, "get_steam_sale_end", AsyncMock(return_value=None)):
+            clock.now.return_value = now
+            await self.service.daily_digest()
+        return lookup
+
+    async def test_schedule_checks_only_users_due_at_their_own_time(self):
+        for user_id in (10, 20, 30):
+            add_wish(user_id)
+        db.update_digest_settings(1, 20, "daily", "18:30")
+        db.update_digest_settings(1, 30, "off", None)
+        server = FakeServer({10, 20, 30})
+
+        lookup = await self.run_scheduled(server, 2026, 10, 29, 15, 59)
+        lookup.assert_not_awaited()
+        await self.run_scheduled(server, 2026, 10, 29, 16)
+        server.members[10].send.assert_awaited_once()
+        server.members[20].send.assert_not_awaited()
+
+        # A fresh service still skips a completed check and catches up later that day.
+        self.service = digest.Digest(MagicMock())
+        lookup = await self.run_scheduled(server, 2026, 10, 29, 18, 45)
+        lookup.assert_awaited_once_with(620)
+        server.members[10].send.assert_awaited_once()
+        server.members[20].send.assert_awaited_once()
+        server.members[30].send.assert_not_awaited()
+        lookup = await self.run_scheduled(server, 2026, 10, 29, 19)
+        lookup.assert_not_awaited()
+
+    async def test_weekly_schedule_only_runs_on_mondays(self):
+        add_wish(10)
+        db.update_digest_settings(1, 10, "weekly", "09:00")
+        server = FakeServer({10})
+
+        await self.run_scheduled(server, 2026, 11, 2, 8, 59)
+        server.members[10].send.assert_not_awaited()
+        await self.run_scheduled(server, 2026, 11, 2, 9)
+        await self.run_scheduled(server, 2026, 11, 2, 10)
+        await self.run_scheduled(server, 2026, 11, 3, 9)
+        server.members[10].send.assert_awaited_once()
+        await self.run_scheduled(server, 2026, 11, 9, 9)
+        self.assertEqual(server.members[10].send.await_count, 2)
+
+    async def test_settings_command_updates_one_field_at_a_time_and_replies_privately(self):
+        interaction = MagicMock(guild_id=1)
+        interaction.user.id = 10
+        interaction.response.send_message = AsyncMock()
+        self.service.guild_id = 1
+        db.update_digest_settings(2, 10, "off", "10:00")
+        db.update_digest_settings(1, 20, "off", "11:00")
+
+        await self.service.change_settings(interaction)
+        self.assertIn("16:00", interaction.response.send_message.await_args.args[0])
+        await self.service.change_settings(interaction, frequency="weekly")
+        await self.service.change_settings(interaction, time="18:30")
+        db.mark_digest_checked(1, {10}, "2026-11-02")
+        await self.service.change_settings(interaction, frequency="off")
+
+        self.assertEqual(db.get_digest_settings(1)[10], ("off", "18:30", "2026-11-02"))
+        self.assertEqual(db.get_digest_settings(1)[20], ("off", "11:00", None))
+        self.assertEqual(db.get_digest_settings(2)[10], ("off", "10:00", None))
+        self.assertTrue(interaction.response.send_message.await_args.kwargs["ephemeral"])
+
+    async def test_invalid_time_does_not_save_other_changes(self):
+        interaction = MagicMock(guild_id=1)
+        interaction.user.id = 10
+        interaction.response.send_message = AsyncMock()
+        await self.service.change_settings(interaction, frequency="weekly", time="24:00")
+
+        self.assertEqual(db.get_digest_settings(1), {})
+        self.assertIn("HH:MM", interaction.response.send_message.await_args.args[0])
+
+    async def test_off_still_allows_a_manual_digest(self):
+        add_wish(10)
+        db.update_digest_settings(1, 10, "off", None)
+        server = FakeServer({10})
+        await self.run_manual(server, 10)
+        server.members[10].send.assert_awaited_once()
+
+    async def test_manual_digest_is_deduplicated_by_the_scheduler(self):
+        add_wish(10)
+        server = FakeServer({10})
+        await self.run_manual(server, 10)
+        await self.run_scheduled(server, 2026, 10, 29, 16)
+        server.members[10].send.assert_awaited_once()
+
+    async def test_database_initialization_upgrades_an_existing_wishlist(self):
+        add_wish(10)
+        with closing(sqlite3.connect(db.DATABASE_PATH)) as conn, conn:
+            conn.execute("DROP TABLE digest_settings")
+        db.init_db()
+
+        self.assertEqual(db.get_digest_settings(1), {})
+        server = FakeServer({10})
+        await self.run_scheduled(server, 2026, 10, 29, 16)
+        server.members[10].send.assert_awaited_once()
+
     async def test_user_gets_a_dm_with_the_price(self):
         add_wish(10)
         server = FakeServer({10})
@@ -352,39 +454,45 @@ class TestRegister(unittest.TestCase):
 
     def test_command_is_added_and_no_schedule_without_a_server(self):
         bot, service = self.register({})
-        bot.tree.add_command.assert_called_once()
-        self.assertEqual(service.command.name, "digest")
+        self.assertEqual(
+            [call.args[0].name for call in bot.tree.add_command.call_args_list],
+            ["digest", "digestsettings"],
+        )
+        self.assertTrue(service.settings_command.guild_only)
+        self.assertEqual(
+            [choice.value for choice in service.settings_command.parameters[0].choices],
+            ["daily", "weekly", "off"],
+        )
         self.assertIsNone(service.guild_id)
 
     def test_default_schedule_is_4_pm_central_through_daylight_saving(self):
         bot, service = self.register({"DIGEST_GUILD_ID": "123"})
         self.assertEqual(service.guild_id, 123)
-        run_time = service.daily_digest.time[0]
-        self.assertEqual((run_time.hour, run_time.minute), (16, 0))
-        self.assertEqual(run_time.tzinfo.key, "America/Chicago")
-        summer = datetime.datetime(2026, 7, 1, tzinfo=run_time.tzinfo).replace(hour=16)
-        winter = datetime.datetime(2026, 12, 1, tzinfo=run_time.tzinfo).replace(hour=16)
+        self.assertEqual(service.default_time, "16:00")
+        self.assertEqual(service.daily_digest.minutes, 1)
+        self.assertEqual(service.tz.key, "America/Chicago")
+        summer = datetime.datetime(2026, 7, 1, 16, tzinfo=service.tz)
+        winter = datetime.datetime(2026, 12, 1, 16, tzinfo=service.tz)
         utc = datetime.timezone.utc
         self.assertEqual((summer.astimezone(utc).hour, winter.astimezone(utc).hour), (21, 22))
 
     def test_time_can_be_changed_in_settings(self):
         bot, service = self.register({"DIGEST_GUILD_ID": "123", "DIGEST_TIME": "14:30"})
-        run_time = service.daily_digest.time[0]
-        self.assertEqual((run_time.hour, run_time.minute), (14, 30))
+        self.assertEqual(service.default_time, "14:30")
 
     def test_bad_timezone_does_not_stop_the_bot(self):
         bot, service = self.register({"DIGEST_GUILD_ID": "123", "DIGEST_TIMEZONE": "Not/AZone"})
-        bot.tree.add_command.assert_called_once()
+        self.assertEqual(bot.tree.add_command.call_count, 2)
         self.assertIsNone(service.guild_id)
 
     def test_bad_server_id_does_not_stop_the_bot(self):
         bot, service = self.register({"DIGEST_GUILD_ID": "abc"})
-        bot.tree.add_command.assert_called_once()
+        self.assertEqual(bot.tree.add_command.call_count, 2)
         self.assertIsNone(service.guild_id)
 
     def test_bad_time_does_not_stop_the_bot(self):
         bot, service = self.register({"DIGEST_GUILD_ID": "123", "DIGEST_TIME": "4pm"})
-        bot.tree.add_command.assert_called_once()
+        self.assertEqual(bot.tree.add_command.call_count, 2)
         self.assertIsNone(service.guild_id)
 
 

@@ -1,9 +1,10 @@
-"""Daily wishlist sale digest, sent as a private message to each user."""
+"""Scheduled and on-demand wishlist sale digests sent by private message."""
 
 import asyncio
 import datetime
 import logging
 import os
+import re
 import sqlite3
 from contextlib import closing
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -22,7 +23,25 @@ import aiohttp
 logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEZONE = "America/Chicago"
+DEFAULT_TIME = "16:00"
 GAMES_PER_MESSAGE = 5  # one DM holds up to 5 game cards, so it stays under Discord's size limits
+
+
+def parse_delivery_time(value):
+    """Validate a 24-hour HH:MM time and return a time for comparisons."""
+    if not re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", value):
+        raise ValueError("Expected a 24-hour time in HH:MM format")
+    return datetime.time.fromisoformat(value)
+
+
+def digest_is_due(now, settings, default_time):
+    frequency, delivery_time, last_day = settings
+    if frequency == "off" or (frequency == "weekly" and now.weekday() != 0):
+        return False
+    return (
+        last_day != now.date().isoformat()
+        and now.time() >= parse_delivery_time(delivery_time or default_time)
+    )
 
 
 def get_saved_games(guild_id):
@@ -219,6 +238,7 @@ class Digest:
         self.bot = bot
         self.guild_id = None
         self.tz = ZoneInfo(DEFAULT_TIMEZONE)
+        self.default_time = DEFAULT_TIME
 
         # Prevent manual and scheduled digests from overlapping in one server.
         self.server_locks = {}
@@ -230,39 +250,80 @@ class Digest:
             callback=self.manual_digest,
         )
         self.command.guild_only = True
+        self.settings_command = app_commands.Command(
+            name="digestsettings",
+            description="View or change your wishlist digest schedule",
+            callback=self.change_settings,
+        )
+        self.settings_command.guild_only = True
 
     def register(self):
-        """Register /digest and optionally start the daily schedule."""
-        guild_setting = os.getenv("DIGEST_GUILD_ID", "").strip()
-
-        if guild_setting:
-            # The daily time is in the digest time zone (Central by default), so
-            # 16:00 stays 4 PM through daylight saving changes.
-            time_setting = os.getenv("DIGEST_TIME", "16:00").strip()
-            zone_setting = os.getenv("DIGEST_TIMEZONE", DEFAULT_TIMEZONE).strip()
-
-            try:
-                self.guild_id = int(guild_setting)
-                self.tz = ZoneInfo(zone_setting)
-                hour, minute = map(int, time_setting.split(":"))
-                run_time = datetime.time(hour=hour, minute=minute, tzinfo=self.tz)
-            except (ValueError, ZoneInfoNotFoundError):
-                # A typo in the settings should not stop the bot from starting.
-                logger.error(
-                    "Ignoring the digest schedule: DIGEST_GUILD_ID must be a number, "
-                    "DIGEST_TIME must look like 16:00, and DIGEST_TIMEZONE must be a "
-                    "name like America/Chicago"
-                )
-                self.guild_id = None
-                self.bot.tree.add_command(self.command)
-                return
-
-            self.daily_digest.change_interval(time=run_time)
-
+        """Register both commands and optionally start checking the schedule."""
         self.bot.tree.add_command(self.command)
+        self.bot.tree.add_command(self.settings_command)
+        guild_setting = os.getenv("DIGEST_GUILD_ID", "").strip()
+        time_setting = os.getenv("DIGEST_TIME", DEFAULT_TIME).strip()
+        zone_setting = os.getenv("DIGEST_TIMEZONE", DEFAULT_TIMEZONE).strip()
 
+        try:
+            guild_id = int(guild_setting) if guild_setting else None
+            self.tz = ZoneInfo(zone_setting)
+            # Accept the same time formats as previous server configurations.
+            hour, minute = map(int, time_setting.split(":"))
+            self.default_time = datetime.time(hour, minute).isoformat(timespec="minutes")
+        except (ValueError, ZoneInfoNotFoundError):
+            logger.error(
+                "Ignoring the digest schedule: DIGEST_GUILD_ID must be a number, "
+                "DIGEST_TIME must look like 16:00, and DIGEST_TIMEZONE must be a "
+                "name like America/Chicago"
+            )
+            return
+
+        self.guild_id = guild_id
         if self.guild_id is not None:
             self.daily_digest.start()
+
+    @app_commands.describe(
+        frequency="Daily, weekly on Mondays, or off",
+        time="Delivery time in 24-hour HH:MM format (bot time zone)",
+    )
+    @app_commands.choices(frequency=[
+        app_commands.Choice(name="Daily", value="daily"),
+        app_commands.Choice(name="Weekly (Monday)", value="weekly"),
+        app_commands.Choice(name="Off", value="off"),
+    ])
+    async def change_settings(
+        self, interaction: discord.Interaction, frequency: str | None = None,
+        time: str | None = None,
+    ):
+        if interaction.guild_id is None:
+            await interaction.response.send_message("Use this command in a server.", ephemeral=True)
+            return
+
+        if time is not None:
+            time = time.strip()
+            try:
+                parse_delivery_time(time)
+            except ValueError:
+                await interaction.response.send_message(
+                    "Enter a 24-hour time in HH:MM format, for example 18:30.",
+                    ephemeral=True,
+                )
+                return
+
+        if frequency is None and time is None:
+            settings = await asyncio.to_thread(db.get_digest_settings, interaction.guild_id)
+            frequency, time, _ = settings.get(interaction.user.id, ("daily", None, None))
+        else:
+            frequency, time = await asyncio.to_thread(
+                db.update_digest_settings, interaction.guild_id, interaction.user.id, frequency, time
+            )
+
+        schedule = {"daily": "Daily", "weekly": "Weekly on Mondays", "off": "Off"}[frequency]
+        reply = f"**Digest schedule:** {schedule}\n**Delivery time:** {time or self.default_time} ({self.tz.key})"
+        if interaction.guild_id != self.guild_id:
+            reply += "\nAutomatic digests are currently disabled for this server."
+        await interaction.response.send_message(reply, ephemeral=True)
 
     async def manual_digest(self, interaction: discord.Interaction):
         """Handle /digest: DM the person who ran it their own wishlist games that are on sale."""
@@ -290,26 +351,37 @@ class Digest:
             logger.exception("Manual digest failed")
             await reply("Sorry, I couldn't finish the digest. Please try again later.")
 
-    async def generate_digest(self, guild, report, only_user_id=None):
+    async def generate_digest(self, guild, report, only_user_id=None, scheduled_at=None):
         """Shared entry point for manual and scheduled runs.
 
         report(text) receives a short summary of what happened.
         With only_user_id set (the /digest command), only that user's games are checked
-        and only that user is messaged. Without it (the daily run), everyone is."""
-        lock = self.server_locks.setdefault((guild.id, only_user_id), asyncio.Lock())
+        and only that user is messaged. Scheduled runs pass their local check time."""
+        lock = self.server_locks.setdefault(guild.id, asyncio.Lock())
 
-        if lock.locked():
+        if lock.locked() and scheduled_at is not None:
             await report("A digest is already being generated, please wait a moment.")
             return
 
         async with lock:
-            await self._build_and_send(guild, report, only_user_id)
+            await self._build_and_send(guild, report, only_user_id, scheduled_at)
 
-    async def _build_and_send(self, guild, report, only_user_id=None):
+    async def _build_and_send(self, guild, report, only_user_id, scheduled_at):
         personal = only_user_id is not None
-        await asyncio.to_thread(ensure_notification_table)
-        today = current_day(self.tz)
+        today = scheduled_at.date().isoformat() if scheduled_at is not None else current_day(self.tz)
         rows = await asyncio.to_thread(get_saved_games, guild.id)
+        due_users = set()
+        if scheduled_at is not None:
+            settings = await asyncio.to_thread(db.get_digest_settings, guild.id)
+            due_users = {
+                user_id
+                for user_id in {int(row[0]) for row in rows}
+                if digest_is_due(scheduled_at, settings.get(user_id, ("daily", None, None)), self.default_time)
+            }
+            if not due_users:
+                return
+
+        await asyncio.to_thread(ensure_notification_table)
 
         
         # Count unique users who want each game across the server
@@ -328,6 +400,8 @@ class Digest:
             already_sent = set()
             rows = [row for row in rows if int(row[0]) == only_user_id]
         else:
+            if scheduled_at is not None:
+                rows = [row for row in rows if int(row[0]) in due_users]
             already_sent = await asyncio.to_thread(get_notified_today, guild.id, today)
 
         # Find which saved users still belong to this server.
@@ -365,6 +439,8 @@ class Digest:
                 game_details[key] = (store, game)
 
         if not games:
+            if due_users:
+                await asyncio.to_thread(db.mark_digest_checked, guild.id, due_users, today)
             await report(
                 "You don't have any games on your wishlist. Use `/wishlist` to add one."
                 if personal
@@ -525,17 +601,19 @@ class Digest:
         if unavailable:
             lines.append(f"Prices were unavailable for {unavailable} game(s). Try again later.")
 
+        if due_users:
+            await asyncio.to_thread(db.mark_digest_checked, guild.id, due_users, today)
         await report("\n".join(lines))
 
     async def _log_report(self, text):
         logger.info("Scheduled digest finished: %s", text.replace("\n", " | "))
 
-    @tasks.loop(hours=24)
+    @tasks.loop(minutes=1)
     async def daily_digest(self):
-        """Send the digest to the configured server's users at the configured daily time."""
+        """Check which users in the configured server are due for a digest."""
         try:
             guild = self.bot.get_guild(self.guild_id) or await self.bot.fetch_guild(self.guild_id)
-            await self.generate_digest(guild, self._log_report)
+            await self.generate_digest(guild, self._log_report, scheduled_at=datetime.datetime.now(self.tz))
         except Exception:
             # Log the failure without stopping future daily runs.
             logger.exception("Scheduled digest failed")

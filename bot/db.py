@@ -8,6 +8,47 @@ def init_db():
     create_tables()
 
 
+def get_digest_settings(guild_id):
+    """Return settings keyed by user ID for one server."""
+    with closing(sqlite3.connect(DATABASE_PATH)) as conn:
+        rows = conn.execute("""
+            SELECT discord_user_id, frequency, delivery_time, last_scheduled_day
+            FROM digest_settings
+            WHERE discord_guild_id = ?
+        """, (str(guild_id),)).fetchall()
+    return {
+        int(user_id): (frequency, delivery_time, last_scheduled_day)
+        for user_id, frequency, delivery_time, last_scheduled_day in rows
+    }
+
+
+def update_digest_settings(guild_id, user_id, frequency, delivery_time):
+    """Save the supplied preferences, keeping the other preferences and run history."""
+    with closing(sqlite3.connect(DATABASE_PATH)) as conn, conn:
+        freq, time = conn.execute("""
+            INSERT INTO digest_settings
+                (discord_guild_id, discord_user_id, frequency, delivery_time)
+            VALUES (?, ?, COALESCE(?, 'daily'), ?)
+            ON CONFLICT (discord_guild_id, discord_user_id) DO UPDATE SET
+                frequency = COALESCE(?, digest_settings.frequency),
+                delivery_time = COALESCE(excluded.delivery_time, digest_settings.delivery_time)
+            RETURNING frequency, delivery_time
+        """, (str(guild_id), str(user_id), frequency, delivery_time, frequency)).fetchone()
+    return freq, time
+
+
+def mark_digest_checked(guild_id, user_ids, day):
+    """Record a scheduled check without changing any saved preferences."""
+    with closing(sqlite3.connect(DATABASE_PATH)) as conn, conn:
+        conn.executemany("""
+            INSERT INTO digest_settings
+                (discord_guild_id, discord_user_id, last_scheduled_day)
+            VALUES (?, ?, ?)
+            ON CONFLICT (discord_guild_id, discord_user_id) DO UPDATE SET
+                last_scheduled_day = excluded.last_scheduled_day
+        """, [(str(guild_id), str(user_id), day) for user_id in user_ids])
+
+
 def add_store_game(guild_id, user_id, store, link, name):
     """Returns True if added, False if this user already has this game from this store.
     store is steam, epic or gog. The link is what tells two copies of a game apart."""
